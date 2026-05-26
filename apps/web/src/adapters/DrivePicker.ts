@@ -60,7 +60,9 @@ export interface ShowPickerOptions {
 }
 
 export async function showDrivePicker(opts: ShowPickerOptions): Promise<PickedFile[]> {
+  console.log("[picker] loading picker library …");
   await loadPickerLib();
+  console.log("[picker] library loaded; building picker UI");
   const picker = window.google?.picker;
   if (!picker) throw new Error("google.picker still unavailable after load.");
 
@@ -96,6 +98,7 @@ export async function showDrivePicker(opts: ShowPickerOptions): Promise<PickedFi
         .enableFeature(picker.Feature.MULTISELECT_ENABLED)
         .enableFeature(picker.Feature.SUPPORT_DRIVES)
         .setCallback((resp) => {
+          console.log("[picker] callback fired with action:", resp.action, resp);
           if (resp.action === picker.Action.PICKED) {
             const docs = resp.docs ?? [];
             resolve(
@@ -110,8 +113,11 @@ export async function showDrivePicker(opts: ShowPickerOptions): Promise<PickedFi
           }
         });
       const instance = builder.build();
+      console.log("[picker] PickerBuilder.build() succeeded; calling setVisible(true)");
       instance.setVisible(true);
+      console.log("[picker] setVisible(true) returned; waiting for user selection or close");
     } catch (e: unknown) {
+      console.error("[picker] picker build/show failed:", e);
       reject(e);
     }
   });

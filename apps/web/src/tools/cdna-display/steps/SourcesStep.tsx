@@ -223,14 +223,20 @@ VITE_GOOGLE_API_KEY=…`}
     }
     setBusy(true);
     setError(null);
+    console.log("[drive] onPick: starting OAuth + Picker flow");
     try {
+      console.log("[drive] requesting OAuth token …");
       const token = await authRef.current!.getToken();
+      console.log("[drive] token received (length=" + token.length + ", prefix=" + token.slice(0, 8) + "…)");
       (window as unknown as { __drive_token?: string }).__drive_token = token;
+      console.log("[drive] opening Picker …");
       const picked = await showDrivePicker({ oauthToken: token, apiKey: API_KEY });
+      console.log("[drive] Picker closed; picked " + picked.length + " file(s)", picked);
       if (picked.length > 0) {
         setDriveFiles(picked.map((p) => ({ id: p.id, name: p.name, sizeBytes: p.sizeBytes })));
       }
     } catch (e: unknown) {
+      console.error("[drive] onPick failed:", e);
       setError((e as Error).message);
     } finally {
       setBusy(false);
