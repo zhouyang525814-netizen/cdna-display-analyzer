@@ -27,15 +27,26 @@ export class DriveFastqSource implements IFastqSource {
 
   async open(signal?: AbortSignal): Promise<ReadableStream<Uint8Array>> {
     const token = await this.auth.getToken();
-    const url = `${DRIVE_API_BASE}/files/${encodeURIComponent(this.meta.id)}?alt=media`;
+    // supportsAllDrives=true: required when the file is in a Shared Drive
+    //   (team drive). Harmless when it isn't, so we always include it.
+    // acknowledgeAbuse=true: lets us download files Google flagged for
+    //   abuse-scanning without manual intervention; FASTQs don't normally
+    //   trip this but it's a safe addition.
+    const url =
+      `${DRIVE_API_BASE}/files/${encodeURIComponent(this.meta.id)}` +
+      `?alt=media&supportsAllDrives=true&acknowledgeAbuse=true`;
     const init: RequestInit = {
       headers: { Authorization: `Bearer ${token}` },
     };
     if (signal) init.signal = signal;
+    console.log(`[drive] fetching file ${this.meta.id} (${this.meta.name})`);
     const res = await fetch(url, init);
     if (!res.ok) {
       const body = await res.text().catch(() => "");
-      throw new Error(`Drive fetch failed: HTTP ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`);
+      throw new Error(
+        `Drive fetch failed for ${this.meta.name} (id=${this.meta.id}): ` +
+          `HTTP ${res.status} ${res.statusText}${body ? ` — ${body}` : ""}`,
+      );
     }
     if (!res.body) {
       throw new Error("Drive response has no body — cannot stream.");
