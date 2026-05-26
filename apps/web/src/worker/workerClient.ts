@@ -8,6 +8,7 @@ import type { PipelineJob, PipelineOutcome, PipelineProgressMsg } from "./types"
 
 let workerInstance: Worker | null = null;
 let api: Comlink.Remote<PipelineWorkerApi> | null = null;
+let workerReady: Promise<void> | null = null;
 let onErrorHandler: ((msg: string) => void) | null = null;
 
 export function setWorkerErrorHandler(handler: (msg: string) => void): void {
@@ -32,18 +33,29 @@ function ensureWorker(): Comlink.Remote<PipelineWorkerApi> {
       console.error(msg, e);
       onErrorHandler?.(msg);
     };
-    // Heartbeat listener: see if the worker can send messages out at all.
-    // Comlink wraps this same channel; if our own listener catches messages
-    // but Comlink's calls hang, the issue is Comlink-specific.
-    workerInstance.addEventListener("message", (e: MessageEvent) => {
-      if (e.data && typeof e.data === "object" && "__heartbeat" in e.data) {
-        const count = (e.data as { __heartbeat: number; ts: number }).__heartbeat;
-        if (count <= 3) {
-          // Log the first few then quiet down so the console isn't spammed.
-          console.log("[main] heartbeat received from worker:", e.data);
+
+    // CRITICAL: module workers with top-level await silently drop messages
+    // sent during the worker's TLA suspension (a Chrome quirk that has
+    // bitten this project in production). The worker posts `{__ready: true}`
+    // after Comlink.expose; we hold `workerReady` until then so the first
+    // RPC call doesn't go out into the void.
+    workerReady = new Promise<void>((resolve, reject) => {
+      const onReady = (e: MessageEvent) => {
+        if (e.data && typeof e.data === "object" && (e.data as { __ready?: boolean }).__ready) {
+          console.log("[main] worker signalled __ready — RPC channel is live");
+          workerInstance!.removeEventListener("message", onReady);
+          resolve();
         }
-      }
+      };
+      workerInstance!.addEventListener("message", onReady);
+      // Timeout so a permanently-dead worker doesn't hang the UI forever.
+      setTimeout(() => {
+        if (workerReady) {
+          reject(new Error("Worker failed to signal __ready within 15 seconds"));
+        }
+      }, 15_000);
     });
+
     api = Comlink.wrap<PipelineWorkerApi>(workerInstance);
   }
   return api;
@@ -55,59 +67,21 @@ export async function runInWorker(
 ): Promise<PipelineOutcome> {
   const a = ensureWorker();
 
-  // Diagnostic 1: confirm the job payload is structured-cloneable. If
-  // postMessage of the same data throws DataCloneError, Comlink swallows
-  // it and the await hangs — testing here surfaces the real reason.
-  try {
-    const cloned = structuredClone({
-      localFiles: job.localFiles,
-      driveFiles: job.driveFiles,
-      rounds: job.rounds,
-      settings: job.settings,
-      useWasm: job.useWasm,
-    });
-    console.log("[main] structuredClone(job) succeeded", {
-      clonedFiles: (cloned as { localFiles: File[] }).localFiles.length,
-    });
-  } catch (cloneErr) {
-    console.error("[main] structuredClone(job) FAILED — this is why the worker is hung:", cloneErr);
-  }
-
-  // Diagnostic 2: send a raw ping via direct postMessage to verify the
-  // basic worker channel works, separate from Comlink.
-  if (workerInstance) {
-    try {
-      workerInstance.postMessage({ __ping: "from-main", ts: Date.now() });
-      console.log("[main] raw ping postMessage sent to worker");
-    } catch (pingErr) {
-      console.error("[main] raw ping postMessage FAILED:", pingErr);
-    }
-  }
+  // Wait for the worker to signal __ready before sending the call. Without
+  // this, the worker's TLA suspension causes Chrome to silently drop the
+  // first postMessage, hanging the RPC forever.
+  console.log("[main] waiting for worker __ready …");
+  await workerReady;
+  console.log("[main] worker is ready — sending run() call");
 
   // Comlink.proxy lets the worker call back into our progress handler.
   const progress = onProgress ? Comlink.proxy(onProgress) : undefined;
-  console.log("[main] runInWorker → calling worker.run() …", {
-    localFiles: job.localFiles.length,
-    driveFiles: job.driveFiles.length,
-    hasProgress: !!progress,
-  });
-  // Watchdog: if the await hasn't resolved/rejected in 10 seconds, scream.
-  // This tells us the RPC is hanging vs. genuinely processing a big file.
-  const watchdog = setTimeout(() => {
-    console.warn(
-      "[main] runInWorker watchdog: 10s elapsed and worker.run() has neither " +
-        "resolved nor thrown. This means the Comlink RPC is hung — the worker " +
-        "either never received the message or never sent a response.",
-    );
-  }, 10_000);
   try {
     const result = await a.run(job, progress);
-    clearTimeout(watchdog);
-    console.log("[main] runInWorker ← worker.run() returned");
+    console.log("[main] worker.run() returned");
     return result;
   } catch (err) {
-    clearTimeout(watchdog);
-    console.error("[main] runInWorker ← worker.run() threw", err);
+    console.error("[main] worker.run() threw", err);
     throw err;
   }
 }

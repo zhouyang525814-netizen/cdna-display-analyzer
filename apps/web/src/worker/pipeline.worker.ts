@@ -164,17 +164,10 @@ try {
   console.error("[worker] Comlink.expose() threw:", e);
 }
 
-// Heartbeat: send a message every 2 seconds. If the main thread receives
-// these but our raw listener never fires for inbound messages, the channel
-// is one-way (Vercel bundling/isolation issue). If neither direction works,
-// the worker is fully isolated from the main thread.
-let heartbeatCount = 0;
-setInterval(() => {
-  heartbeatCount++;
-  try {
-    self.postMessage({ __heartbeat: heartbeatCount, ts: Date.now() });
-  } catch (e) {
-    console.error("[worker] heartbeat postMessage threw:", e);
-  }
-}, 2000);
-wlog("heartbeat interval started (every 2s)");
+// Critical: signal the main thread that we're fully ready to accept
+// messages. With module workers + top-level-await (used by the WASM
+// init), messages sent before the worker finishes evaluating its module
+// are silently dropped by Chrome. The main thread waits for this signal
+// before posting anything; until then it just queues calls.
+self.postMessage({ __ready: true, ts: Date.now() });
+wlog("__ready signal sent to main thread");
