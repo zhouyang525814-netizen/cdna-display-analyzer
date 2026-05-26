@@ -82,7 +82,11 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
   for (let srcIdx = 0; srcIdx < req.sources.length; srcIdx++) {
     const source = req.sources[srcIdx]!;
     const desc = source.describe();
+    // Surface entry into each source so a stuck source.open() (e.g. a
+    // Drive fetch that never resolves) is obvious in the log.
+    console.log(`[pipeline] source[${srcIdx}] opening: ${desc.name} (${desc.sizeBytes ?? "?"} bytes)`);
     const stream = await source.open(req.signal);
+    console.log(`[pipeline] source[${srcIdx}] stream opened, beginning read loop`);
 
     let bytesProcessed = 0;
     let recordsProcessed = 0;
