@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, FileText, Cloud, X, ArrowRight } from "lucide-react";
+import { FolderOpen, FileText, Cloud, X, ArrowRight, Sparkles } from "lucide-react";
 import { useRunStore } from "@/state/useRunStore";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -9,20 +9,64 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { DriveAuthProvider } from "@/adapters/DriveAuthProvider";
 import { showDrivePicker } from "@/adapters/DrivePicker";
+import { DEMO_REFERENCE, DEMO_ROUNDS, loadDemoFastq } from "@/tools/cdna-display/demo";
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
 const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY as string | undefined;
 
 export function SourcesStep() {
-  const { projectName, setProjectName, localFiles, driveFiles, setLocalFiles, setDriveFiles, clearAllFiles, goNext } = useRunStore();
+  const {
+    projectName,
+    setProjectName,
+    localFiles,
+    driveFiles,
+    setLocalFiles,
+    setDriveFiles,
+    clearAllFiles,
+    goNext,
+    setReferenceSeq,
+    setRounds,
+    rounds,
+    setStep,
+  } = useRunStore();
   const totalFiles = localFiles.length + driveFiles.length;
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [demoBusy, setDemoBusy] = useState(false);
+  const [demoErr, setDemoErr] = useState<string | null>(null);
 
   const onFiles = (list: FileList | null) => {
     if (!list) return;
     const arr = Array.from(list).filter((f) => /\.(fastq|fq)$/i.test(f.name));
     setLocalFiles([...localFiles, ...arr]);
+  };
+
+  const loadDemo = async () => {
+    setDemoBusy(true);
+    setDemoErr(null);
+    try {
+      const file = await loadDemoFastq();
+      // Replace any previously-picked files so the demo run is reproducible.
+      setLocalFiles([file]);
+      setDriveFiles([]);
+      setProjectName("Demo_run");
+      setReferenceSeq(DEMO_REFERENCE);
+      // Preserve any existing round ids that match by name; rebuild from
+      // the demo config so cdsStart/cdsEnd are populated and the user can
+      // click straight through to Run.
+      const nextRounds = DEMO_ROUNDS.map((r, i) => ({
+        ...r,
+        id: rounds[i]?.id ?? `demo_${i}_${Date.now()}`,
+      }));
+      setRounds(nextRounds);
+      // Drop the user right at the Run step — the wizard skipped past
+      // Configure + Preview because everything is already filled in.
+      setStep("run");
+    } catch (e: unknown) {
+      setDemoErr((e as Error).message);
+    } finally {
+      setDemoBusy(false);
+    }
   };
 
   return (
@@ -41,6 +85,31 @@ export function SourcesStep() {
             className="mt-1.5 max-w-md"
           />
         </CardContent>
+      </Card>
+
+      <Card className="border-primary/30 bg-primary/5">
+        <CardHeader className="flex flex-row items-start justify-between space-y-0 gap-4">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Sparkles className="h-4 w-4 text-primary" />
+              First time here? Try the demo
+            </CardTitle>
+            <CardDescription className="mt-1">
+              Loads a 1,000-read synthetic FASTQ + matching primer config and
+              jumps straight to the Run step. Whole flow finishes in under a
+              second. No Google sign-in needed.
+            </CardDescription>
+          </div>
+          <Button onClick={loadDemo} disabled={demoBusy} className="shrink-0">
+            <Sparkles className="mr-1.5 h-4 w-4" />
+            {demoBusy ? "Loading…" : "Try with demo data"}
+          </Button>
+        </CardHeader>
+        {demoErr && (
+          <CardContent className="pt-0">
+            <p className="text-sm text-destructive">{demoErr}</p>
+          </CardContent>
+        )}
       </Card>
 
       <Card>

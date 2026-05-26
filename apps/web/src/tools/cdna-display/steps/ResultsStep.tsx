@@ -5,6 +5,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { exportOutcome } from "@/adapters/BrowserExporter";
+import { FilterFunnelSankey } from "@/tools/cdna-display/viz/FilterFunnelSankey";
+import { CountHistogram } from "@/tools/cdna-display/viz/CountHistogram";
+import { EnrichmentScatter } from "@/tools/cdna-display/viz/EnrichmentScatter";
+import { HammingClusters } from "@/tools/cdna-display/viz/HammingClusters";
+import { parseEnrichmentMatrix } from "@/tools/cdna-display/viz/csvParse";
 
 export function ResultsStep() {
   const state = useRunStore();
@@ -47,6 +52,14 @@ export function ResultsStep() {
     };
   }, [outcome.csvBlob]);
   const topPeptides = useMemo(() => parseTopPeptides(csvText, 20), [csvText]);
+
+  // Full matrix parse for the visualization stack. We cap at 50,000 rows —
+  // far above any realistic peptide diversity for this assay, and keeps the
+  // main-thread work bounded if someone feeds in a freakishly diverse run.
+  const parsedMatrix = useMemo(
+    () => parseEnrichmentMatrix(csvText ?? "", 50_000),
+    [csvText],
+  );
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -127,6 +140,79 @@ export function ResultsStep() {
           </div>
         </CardContent>
       </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Filtering funnel</CardTitle>
+          <CardDescription>
+            Every read enters from the left. Wide bands going to discard buckets
+            indicate where the experiment is losing throughput. Hover any band
+            for exact counts.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <FilterFunnelSankey outcome={outcome} />
+        </CardContent>
+      </Card>
+
+      {parsedMatrix.rows.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Read-count distribution per round</CardTitle>
+            <CardDescription>
+              Histogram of how often each unique peptide appears, on a log₁₀
+              scale. The dashed curve is a log-normal fit. A narrow distribution
+              shifted right means the round has converged on a few winners; a
+              wide left-shifted distribution means the library is still diverse.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <CountHistogram
+              rows={parsedMatrix.rows}
+              roundNames={parsedMatrix.roundNames}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {parsedMatrix.rows.length > 0 && parsedMatrix.roundNames.length >= 2 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Enrichment scatter</CardTitle>
+            <CardDescription>
+              Each point is one peptide. X = RPM in the earlier round, Y = RPM
+              in the later round (both log-scaled). Points above the dashed
+              y = x line are enriched in the later round. Top 50 hits
+              highlighted in red.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <EnrichmentScatter
+              rows={parsedMatrix.rows}
+              roundNames={parsedMatrix.roundNames}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {parsedMatrix.rows.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Top-200 Hamming clusters</CardTitle>
+            <CardDescription>
+              The 200 most-enriched peptides clustered by ≤ 2 amino-acid
+              differences. A few large clusters = a converged selection;
+              many singletons = a still-diverse library.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <HammingClusters
+              rows={parsedMatrix.rows}
+              roundNames={parsedMatrix.roundNames}
+            />
+          </CardContent>
+        </Card>
+      )}
 
       {topPeptides.rows.length > 0 && (
         <Card>
