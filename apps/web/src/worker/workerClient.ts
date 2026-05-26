@@ -49,11 +49,22 @@ export async function runInWorker(
     driveFiles: job.driveFiles.length,
     hasProgress: !!progress,
   });
+  // Watchdog: if the await hasn't resolved/rejected in 10 seconds, scream.
+  // This tells us the RPC is hanging vs. genuinely processing a big file.
+  const watchdog = setTimeout(() => {
+    console.warn(
+      "[main] runInWorker watchdog: 10s elapsed and worker.run() has neither " +
+        "resolved nor thrown. This means the Comlink RPC is hung — the worker " +
+        "either never received the message or never sent a response.",
+    );
+  }, 10_000);
   try {
     const result = await a.run(job, progress);
+    clearTimeout(watchdog);
     console.log("[main] runInWorker ← worker.run() returned");
     return result;
   } catch (err) {
+    clearTimeout(watchdog);
     console.error("[main] runInWorker ← worker.run() threw", err);
     throw err;
   }

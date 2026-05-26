@@ -42,7 +42,15 @@ function staticAuth(token: string): IAuthProvider {
   };
 }
 
-wlog("module loaded and Comlink endpoint exposed");
+// Raw `message` listener BEFORE Comlink.expose — verifies that postMessage
+// from the main thread is actually arriving at the worker. If this fires but
+// `[worker] run() entered` doesn't, the message is reaching us but Comlink
+// isn't dispatching it.
+self.addEventListener("message", (event: MessageEvent) => {
+  wlog("raw postMessage received", { dataType: typeof event.data, hasPort: event.ports.length });
+});
+
+wlog("module loaded — about to call Comlink.expose");
 
 const api = {
   /**
@@ -149,4 +157,9 @@ const api = {
 
 export type PipelineWorkerApi = typeof api;
 
-Comlink.expose(api);
+try {
+  Comlink.expose(api);
+  wlog("Comlink.expose() returned successfully");
+} catch (e: unknown) {
+  console.error("[worker] Comlink.expose() threw:", e);
+}
