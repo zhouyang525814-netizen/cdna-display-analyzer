@@ -26,7 +26,7 @@
     "pkg-web/cdna_core_wasm_bg.wasm.d.ts"
   ],
   "scripts": {
-    "build": "if [ ! -f pkg/cdna_core_wasm.js ] || [ ! -f pkg-web/cdna_core_wasm.js ]; then pnpm run build:wasm; else echo '[core-wasm] prebuilt artifacts present, skipping wasm-pack (run pnpm run build:wasm to force)'; fi",
+    "build": "node build-if-needed.cjs",
     "build:wasm": "mamba run -n cdna-web wasm-pack build --target nodejs --release && mamba run -n cdna-web wasm-pack build --target bundler --release --out-dir pkg-web"
   }
 }
