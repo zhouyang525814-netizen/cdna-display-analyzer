@@ -27,6 +27,11 @@ export interface PipelineRequest {
   /** Opt into the WASM scoring hot path. The TS path remains as a reference;
    *  both must produce byte-identical results (asserted by the parity test). */
   useWasm?: boolean;
+  /** Per-source round binding. When provided, must be the same length as
+   *  `sources`; each entry is an index into `rounds`. The engine will only
+   *  score that source's reads against the bound round (no cross-round
+   *  competition). Omit for the historical multiplexed/barcoded behaviour. */
+  sourceRoundIndices?: ReadonlyArray<number>;
 }
 
 export interface PipelineProgress {
@@ -120,6 +125,14 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
       }
     });
 
+    // Per-round binding (when provided) skips cross-round competition. We
+    // resolve the bound round index up-front so the hot inner loop just
+    // branches on `boundRoundIdx === -1` rather than re-checking config.
+    const boundRoundIdx =
+      req.sourceRoundIndices && req.sourceRoundIndices.length === req.sources.length
+        ? req.sourceRoundIndices[srcIdx] ?? -1
+        : -1;
+
     try {
       for await (const rec of readFastqRecords(bytesIter)) {
         if (req.signal?.aborted) throw req.signal.reason ?? new Error("aborted");
@@ -129,13 +142,19 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
         if (meanPhred(rec.qual) < req.settings.minMeanPhred) {
           engine.recordLowQuality();
         } else {
-          let reason = engine.processRead(rec.seq);
+          let reason =
+            boundRoundIdx >= 0
+              ? engine.processReadForRound(rec.seq, boundRoundIdx)
+              : engine.processRead(rec.seq);
           if (reason !== "assigned") {
             if (rec.seq.length > rcScratch.length) {
               rcScratch = new Uint8Array(rec.seq.length);
             }
             const rcBytes = rcInto(rec.seq, rcScratch);
-            reason = engine.processRead(rcBytes);
+            reason =
+              boundRoundIdx >= 0
+                ? engine.processReadForRound(rcBytes, boundRoundIdx)
+                : engine.processRead(rcBytes);
           }
           if (reason !== "assigned") {
             engine.recordUnassigned(reason);

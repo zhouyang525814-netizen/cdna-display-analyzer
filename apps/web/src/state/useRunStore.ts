@@ -18,6 +18,19 @@ export const STEP_ORDER: StepId[] = ["sources", "configure", "preview", "run", "
 
 export type RunStatus = "idle" | "running" | "done" | "error" | "cancelled";
 
+/** Two ways to feed reads into the demultiplex engine.
+ *
+ *  - `multiplexed` (default, historical): all FASTQs are scanned against
+ *    every configured round; the engine picks the best-matching barcode
+ *    per read. Use when rounds were pooled-and-barcoded onto one run.
+ *
+ *  - `per-round`: each FASTQ is bound to exactly one round by the user.
+ *    The engine scores every read only against that round's primer — no
+ *    cross-round competition. Use when each selection round was sequenced
+ *    independently (same primer is then safe across rounds; no cross-talk
+ *    because each file is physically separate). */
+export type PipelineMode = "multiplexed" | "per-round";
+
 export interface LogEntry {
   text: string;
   tag: "info" | "success" | "warning" | "error";
@@ -52,6 +65,11 @@ interface RunState {
   adaptive: boolean;
   filterStop: boolean;
   useWasm: boolean;
+  pipelineMode: PipelineMode;
+  /** In per-round mode, maps each source's display name (File.name or Drive
+   *  file name) → the round it's bound to. In multiplexed mode this is
+   *  ignored. */
+  fileToRound: Record<string, string>;
 
   // Step 3 — preview
   /** Estimated read length, sampled from the first FASTQ during preview. */
@@ -88,6 +106,8 @@ interface RunState {
   setAdaptive: (v: boolean) => void;
   setFilterStop: (v: boolean) => void;
   setUseWasm: (v: boolean) => void;
+  setPipelineMode: (m: PipelineMode) => void;
+  setFileRound: (fileName: string, round: string) => void;
 
   setPreview: (estReadLen: number, results: PreviewResult[]) => void;
   clearPreview: () => void;
@@ -129,6 +149,8 @@ export const useRunStore = create<RunState>((set, get) => ({
   adaptive: true,
   filterStop: true,
   useWasm: true,
+  pipelineMode: "multiplexed",
+  fileToRound: {},
 
   estimatedReadLength: 150,
   previewResults: [],
@@ -170,6 +192,9 @@ export const useRunStore = create<RunState>((set, get) => ({
   setAdaptive: (v) => set({ adaptive: v }),
   setFilterStop: (v) => set({ filterStop: v }),
   setUseWasm: (v) => set({ useWasm: v }),
+  setPipelineMode: (m) => set({ pipelineMode: m }),
+  setFileRound: (fileName, round) =>
+    set((s) => ({ fileToRound: { ...s.fileToRound, [fileName]: round } })),
 
   setPreview: (estReadLen, results) =>
     set({ estimatedReadLength: estReadLen, previewResults: results }),
@@ -205,6 +230,8 @@ export const useRunStore = create<RunState>((set, get) => ({
       driveFiles: [],
       referenceSeq: "",
       rounds: [defaultRound(0), defaultRound(1)],
+      pipelineMode: "multiplexed",
+      fileToRound: {},
       previewResults: [],
       status: "idle",
       progress: null,

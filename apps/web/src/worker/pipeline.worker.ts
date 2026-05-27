@@ -109,13 +109,19 @@ const api = {
         });
       };
 
-      log("calling runPipeline …");
+      log("calling runPipeline …", {
+        mode: job.mode ?? "multiplexed",
+        sourceRoundIndices: job.sourceRoundIndices,
+      });
       const result = await runPipeline({
         sources,
         rounds: job.rounds,
         settings: job.settings,
         useWasm: job.useWasm,
         onProgress: wrappedProgress,
+        ...(job.mode === "per-round" && job.sourceRoundIndices
+          ? { sourceRoundIndices: job.sourceRoundIndices }
+          : {}),
       });
       log("runPipeline returned", {
         globalUnassigned: result.globalUnassigned,

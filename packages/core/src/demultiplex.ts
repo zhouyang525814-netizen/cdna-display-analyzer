@@ -303,4 +303,83 @@ export class DemultiplexEngine {
     this.globalUnassigned++;
     this.unassignedBreakdown[reason]++;
   }
+
+  /** Per-round entry point used by per-FASTQ-per-round mode. Scores the read
+   *  only against `roundIdx`'s primer (no cross-round competition, no
+   *  ambiguity check). If the Fw anchor is missing we still return
+   *  "no_anchor" so the caller can retry on the reverse complement, but the
+   *  read is NEVER reassigned to a different round.
+   *
+   *  All downstream behaviour (CDS slice, frameshift, stop-codon, commit) is
+   *  identical to processRead — we just bypass the round-comparison step.
+   *  Yields byte-identical numerical results for single-round configurations
+   *  by construction. */
+  processReadForRound(seq: Uint8Array, roundIdx: number): ProcessResult {
+    const cfg = this.rounds[roundIdx];
+    if (!cfg) return "no_anchor";
+
+    const idx = indexOfBytes(seq, cfg.fwAnchor);
+    if (idx === -1) return "no_anchor";
+
+    // Compute the barcode-mismatch score (kept for stats parity, even though
+    // we no longer compete rounds). A read whose barcode is bad enough to
+    // exceed MAX_BARCODE_ERROR still gets charged to "barcode_mismatch" so
+    // per-round QC numbers stay meaningful.
+    const expectedBc = cfg.fwBarcode;
+    const expectedBcLen = expectedBc.length;
+    const bcStart = Math.max(0, idx - expectedBcLen);
+    const readBcLen = idx - bcStart;
+    const lenDiff = expectedBcLen - readBcLen;
+    let score = lenDiff > 0 ? lenDiff : 0;
+    const compareStart = lenDiff > 0 ? lenDiff : 0;
+    for (let j = 0; j < readBcLen; j++) {
+      const e = expectedBc[compareStart + j];
+      const v = seq[bcStart + j];
+      if (v === ASCII.N) score += 0.5;
+      else if (v !== e) score += 1.0;
+    }
+    if (score > MAX_BARCODE_ERROR) return "barcode_mismatch";
+
+    const bestFwEndIdx = idx + cfg.fwAnchor.length;
+
+    const roundStats = this.stats.get(cfg.name)!;
+    roundStats.total_assigned++;
+
+    const startOffset = cfg.cdsStart - 1;
+    const cdsStartAbs = bestFwEndIdx + startOffset;
+    const cdsEndAbs = bestFwEndIdx + cfg.cdsEnd;
+
+    if (cdsEndAbs > seq.length || cdsStartAbs < 0) {
+      roundStats.discard_truncated++;
+      return "assigned";
+    }
+
+    const cdsBytes = seq.subarray(cdsStartAbs, cdsEndAbs);
+    const cdsLen = cdsBytes.length;
+
+    if (!this.settings.adaptive) {
+      const rvIdx = indexOfBytes(seq, cfg.rvAnchor, bestFwEndIdx);
+      if (rvIdx !== -1 && cdsEndAbs > rvIdx) {
+        roundStats.discard_length_indel++;
+        return "assigned";
+      }
+    }
+
+    if (cdsLen % 3 !== 0) {
+      roundStats.discard_length_indel++;
+      return "assigned";
+    }
+
+    if (this.settings.filterStop && !hasNoStopCodon(cdsBytes)) {
+      roundStats.discard_stop_codon++;
+      return "assigned";
+    }
+
+    roundStats.passed_qc++;
+    const cdsStr = decodeCds(cdsBytes);
+    const counter = this.dnaCounters.get(cfg.name)!;
+    counter.set(cdsStr, (counter.get(cdsStr) ?? 0) + 1);
+
+    return "assigned";
+  }
 }

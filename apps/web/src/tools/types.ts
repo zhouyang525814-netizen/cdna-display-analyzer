@@ -28,9 +28,16 @@ export interface Tool {
   id: string;
   /** Human-readable name shown in the app header. */
   name: string;
-  /** One-line tagline for tool-picker UI (not surfaced today; ready for later). */
+  /** Compact name for the tool-switcher pill (defaults to `name`). */
+  shortName?: string;
+  /** One-line tagline for tool-picker UI and pill tooltips. */
   description: string;
   icon?: LucideIcon;
   /** Step list in display order. */
   steps: ToolStep[];
+  /** Hook returning the active step id for this tool. Each tool owns its own
+   *  store; this hook bridges in. Omit to render the first step always. */
+  useCurrentStep?: () => string;
+  /** Hook returning a setter for the active step id. Drives stepper click-back. */
+  useSetStep?: () => (stepId: string) => void;
 }

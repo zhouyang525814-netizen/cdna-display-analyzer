@@ -21,6 +21,13 @@ export interface PipelineJob {
   rounds: RoundConfigInput[];
   settings: DemultiplexSettings;
   useWasm: boolean;
+  /** Pipeline mode. "multiplexed" preserves the historical demultiplex-by-
+   *  barcode behaviour. "per-round" requires `sourceRoundIndices` and tells
+   *  the worker to score each file's reads only against its bound round. */
+  mode?: "multiplexed" | "per-round";
+  /** In per-round mode, parallel array to `localFiles` followed by `driveFiles`
+   *  giving the round index (into `rounds`) each source is bound to. */
+  sourceRoundIndices?: number[];
 }
 
 export interface PipelineProgressMsg {

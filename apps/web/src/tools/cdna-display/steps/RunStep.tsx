@@ -42,9 +42,40 @@ export function RunStep() {
       cdsStart: r.cdsStart!,
       cdsEnd: r.cdsEnd!,
     }));
+
+    // Per-round mode: convert the file→round name mapping into a parallel
+    // index array matching [...localFiles, ...driveFiles]. A missing binding
+    // for any file aborts before launching the worker — otherwise that file
+    // would be silently dropped in the per-round branch of pipeline.ts.
+    let sourceRoundIndices: number[] | undefined;
+    if (s.pipelineMode === "per-round") {
+      const nameToIdx = new Map(roundsCfg.map((r, i) => [r.name, i]));
+      const sourceNames = [
+        ...s.localFiles.map((f) => f.name),
+        ...s.driveFiles.map((d) => d.name),
+      ];
+      const indices: number[] = [];
+      const unbound: string[] = [];
+      for (const name of sourceNames) {
+        const round = s.fileToRound[name];
+        const idx = round != null ? nameToIdx.get(round) : undefined;
+        if (idx == null) unbound.push(name);
+        else indices.push(idx);
+      }
+      if (unbound.length > 0) {
+        const msg = `Per-round mode: these files are not bound to a round: ${unbound.join(", ")}`;
+        s.appendLog({ text: msg, tag: "error" });
+        s.failRun(msg);
+        return;
+      }
+      sourceRoundIndices = indices;
+    }
+
     s.startRun();
     s.appendLog({
-      text: `Pipeline started · ${roundsCfg.length} round(s) · ${s.localFiles.length + s.driveFiles.length} file(s) · WASM=${s.useWasm}`,
+      text:
+        `Pipeline started · mode=${s.pipelineMode} · ${roundsCfg.length} round(s) · ` +
+        `${s.localFiles.length + s.driveFiles.length} file(s) · WASM=${s.useWasm}`,
       tag: "info",
     });
     try {
@@ -61,6 +92,8 @@ export function RunStep() {
             minMeanPhred: 20.0,
           },
           useWasm: s.useWasm,
+          mode: s.pipelineMode,
+          ...(sourceRoundIndices ? { sourceRoundIndices } : {}),
         },
         (p) => useRunStore.getState().updateProgress(p),
       );

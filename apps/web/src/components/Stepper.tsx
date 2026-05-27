@@ -10,11 +10,29 @@ import type { ToolStep } from "@/tools/types";
 
 export interface StepperProps {
   steps: ReadonlyArray<ToolStep>;
+  /** Optional bridge into the active tool's store. If omitted we fall back to
+   *  the cdna-display run store (legacy behaviour, single-tool app). */
+  useCurrentStep?: () => string;
+  useSetStep?: () => (stepId: string) => void;
 }
 
-export function Stepper({ steps }: StepperProps) {
-  const currentStep = useRunStore((s) => s.currentStep);
-  const setStep = useRunStore((s) => s.setStep);
+function fallbackUseCurrentStep(): string {
+  return useRunStore((s) => s.currentStep);
+}
+
+function fallbackUseSetStep(): (s: string) => void {
+  return useRunStore((s) => s.setStep);
+}
+
+export function Stepper({
+  steps,
+  useCurrentStep = fallbackUseCurrentStep,
+  useSetStep = fallbackUseSetStep,
+}: StepperProps) {
+  const currentStep = useCurrentStep();
+  const setStep = useSetStep();
+  // Status badge still comes from the cdna-display store; harmless when
+  // running the Nanopore tool — the variable just stays "idle".
   const status = useRunStore((s) => s.status);
   const currentIdx = steps.findIndex((s) => s.id === currentStep);
 

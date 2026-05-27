@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { FolderOpen, FileText, Cloud, X, ArrowRight, Sparkles } from "lucide-react";
+import { FolderOpen, FileText, Cloud, X, ArrowRight, Sparkles, Layers, Files } from "lucide-react";
 import { useRunStore } from "@/state/useRunStore";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -28,6 +28,10 @@ export function SourcesStep() {
     setRounds,
     rounds,
     setStep,
+    pipelineMode,
+    setPipelineMode,
+    fileToRound,
+    setFileRound,
   } = useRunStore();
   const totalFiles = localFiles.length + driveFiles.length;
   const inputRef = useRef<HTMLInputElement>(null);
@@ -114,6 +118,33 @@ export function SourcesStep() {
 
       <Card>
         <CardHeader>
+          <CardTitle>Pipeline mode</CardTitle>
+          <CardDescription>
+            Choose how each FASTQ maps to a selection round.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <ModeOption
+              active={pipelineMode === "multiplexed"}
+              icon={Layers}
+              title="Multiplexed (default)"
+              description="Reads from one or more FASTQs are demultiplexed by barcode across all rounds. Each round needs a distinct primer barcode."
+              onClick={() => setPipelineMode("multiplexed")}
+            />
+            <ModeOption
+              active={pipelineMode === "per-round"}
+              icon={Files}
+              title="One FASTQ per round"
+              description="Each FASTQ is bound to one round; no barcode demultiplex. Same primer across rounds is safe. You'll bind files to rounds below."
+              onClick={() => setPipelineMode("per-round")}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
           <CardTitle>FASTQ sources</CardTitle>
           <CardDescription>
             Single-end FASTQ files only. `.fastq.gz` is not yet supported.
@@ -186,26 +217,50 @@ export function SourcesStep() {
               </div>
               <ul className="divide-y rounded-md border text-sm">
                 {localFiles.map((f, i) => (
-                  <li key={"l:" + i} className="flex items-center justify-between px-3 py-2">
+                  <li key={"l:" + i} className="flex items-center justify-between gap-2 px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <Badge variant="secondary">local</Badge>
                       <span className="truncate font-mono text-xs">{f.name}</span>
                     </div>
-                    <span className="text-xs text-muted-foreground">{formatBytes(f.size)}</span>
+                    <div className="flex shrink-0 items-center gap-3">
+                      {pipelineMode === "per-round" && (
+                        <RoundSelector
+                          rounds={rounds}
+                          value={fileToRound[f.name]}
+                          onChange={(r) => setFileRound(f.name, r)}
+                        />
+                      )}
+                      <span className="text-xs text-muted-foreground">{formatBytes(f.size)}</span>
+                    </div>
                   </li>
                 ))}
                 {driveFiles.map((d) => (
-                  <li key={"d:" + d.id} className="flex items-center justify-between px-3 py-2">
+                  <li key={"d:" + d.id} className="flex items-center justify-between gap-2 px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">
                       <Badge>drive</Badge>
                       <span className="truncate font-mono text-xs">{d.name}</span>
                     </div>
-                    <span className="text-xs text-muted-foreground">
-                      {d.sizeBytes != null ? formatBytes(d.sizeBytes) : "—"}
-                    </span>
+                    <div className="flex shrink-0 items-center gap-3">
+                      {pipelineMode === "per-round" && (
+                        <RoundSelector
+                          rounds={rounds}
+                          value={fileToRound[d.name]}
+                          onChange={(r) => setFileRound(d.name, r)}
+                        />
+                      )}
+                      <span className="text-xs text-muted-foreground">
+                        {d.sizeBytes != null ? formatBytes(d.sizeBytes) : "—"}
+                      </span>
+                    </div>
                   </li>
                 ))}
               </ul>
+              {pipelineMode === "per-round" && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  In per-round mode, every file must be bound to a round before
+                  the run can start. Define rounds + primers in the next step.
+                </p>
+              )}
             </div>
           )}
         </CardContent>
@@ -372,4 +427,67 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function ModeOption({
+  active,
+  icon: Icon,
+  title,
+  description,
+  onClick,
+}: {
+  active: boolean;
+  icon: typeof Layers;
+  title: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "flex items-start gap-3 rounded-lg border p-3 text-left transition " +
+        (active
+          ? "border-primary bg-primary/5"
+          : "border-border bg-card hover:border-primary/40 hover:bg-muted/50")
+      }
+    >
+      <Icon
+        className={"mt-0.5 h-4 w-4 shrink-0 " + (active ? "text-primary" : "text-muted-foreground")}
+      />
+      <div className="min-w-0">
+        <div className="text-sm font-medium">{title}</div>
+        <div className="mt-0.5 text-xs text-muted-foreground">{description}</div>
+      </div>
+    </button>
+  );
+}
+
+function RoundSelector({
+  rounds,
+  value,
+  onChange,
+}: {
+  rounds: { id: string; name: string }[];
+  value: string | undefined;
+  onChange: (r: string) => void;
+}) {
+  return (
+    <select
+      value={value ?? ""}
+      onChange={(e) => onChange(e.target.value)}
+      className="h-7 rounded border bg-background px-2 text-xs font-mono"
+      title="Bind this file to a round"
+    >
+      <option value="" disabled>
+        choose round…
+      </option>
+      {rounds.map((r) => (
+        <option key={r.id} value={r.name}>
+          {r.name}
+        </option>
+      ))}
+    </select>
+  );
 }

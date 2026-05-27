@@ -1,38 +1,85 @@
-// App shell. Reads the active tool from tools/cdna-display (today the only
-// one) and renders its header + stepper + active step. When a second tool
-// is added, this file picks the active one from a registry / URL route —
-// no other change is needed.
+// App shell. Renders the active tool's stepper + active step, with a
+// top-of-page tool switcher that routes between cDNA-DISPLAY and Nanopore SSM
+// (and any future sibling tools listed in tools/registry.ts).
 
 import { Stepper } from "@/components/Stepper";
-import { useRunStore } from "@/state/useRunStore";
-import { cdnaDisplayTool } from "@/tools/cdna-display";
-
-const tool = cdnaDisplayTool;
+import { useAppStore } from "@/state/useAppStore";
+import { tools, toolById } from "@/tools/registry";
 
 export function App() {
-  const currentStep = useRunStore((s) => s.currentStep);
-  const ActiveStep = tool.steps.find((s) => s.id === currentStep)?.Component;
+  const activeToolId = useAppStore((s) => s.activeToolId);
+  const setActiveTool = useAppStore((s) => s.setActiveTool);
+  const tool = toolById(activeToolId);
+  // Each tool owns its own currentStep field (cdna-display uses useRunStore,
+  // nanopore-ssm uses useNanoporeStore). The Tool definition optionally
+  // provides a hook to read the active step; if absent we use the first step.
+  const ActiveStepFromHook = tool.useCurrentStep?.();
+  const ActiveStep =
+    tool.steps.find((s) => s.id === ActiveStepFromHook)?.Component ?? tool.steps[0]!.Component;
   const Icon = tool.icon;
 
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
           <div className="flex items-center gap-2">
             {Icon ? <Icon className="h-5 w-5 text-primary" /> : null}
             <h1 className="text-base font-semibold tracking-tight">{tool.name}</h1>
           </div>
-          <span className="text-xs text-muted-foreground">Browser-only · no upload</span>
+          <div className="flex items-center gap-3">
+            <ToolSwitcher activeId={activeToolId} onChange={setActiveTool} />
+            <span className="hidden text-xs text-muted-foreground sm:inline">
+              Browser-only · no upload
+            </span>
+          </div>
         </div>
       </header>
 
-      <Stepper steps={tool.steps} />
+      <Stepper
+        steps={tool.steps}
+        {...(tool.useCurrentStep ? { useCurrentStep: tool.useCurrentStep } : {})}
+        {...(tool.useSetStep ? { useSetStep: tool.useSetStep } : {})}
+      />
 
       <main className="mx-auto max-w-7xl px-4 py-8">
-        {ActiveStep ? <ActiveStep /> : null}
+        <ActiveStep />
       </main>
 
       <SiteFooter />
+    </div>
+  );
+}
+
+function ToolSwitcher({
+  activeId,
+  onChange,
+}: {
+  activeId: string;
+  onChange: (id: string) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-md border bg-muted/50 p-0.5 text-xs">
+      {tools.map((t) => {
+        const Icon = t.icon;
+        const isActive = t.id === activeId;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onChange(t.id)}
+            title={t.description}
+            className={
+              "inline-flex items-center gap-1.5 rounded px-2.5 py-1 transition-colors " +
+              (isActive
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground")
+            }
+          >
+            {Icon ? <Icon className="h-3.5 w-3.5" /> : null}
+            <span className="font-medium">{t.shortName ?? t.name}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

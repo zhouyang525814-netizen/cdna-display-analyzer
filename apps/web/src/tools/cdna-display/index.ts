@@ -5,6 +5,7 @@
 
 import { Dna } from "lucide-react";
 import type { Tool } from "@/tools/types";
+import { useRunStore } from "@/state/useRunStore";
 import { SourcesStep } from "./steps/SourcesStep";
 import { ConfigureStep } from "./steps/ConfigureStep";
 import { PreviewStep } from "./steps/PreviewStep";
@@ -14,6 +15,7 @@ import { ResultsStep } from "./steps/ResultsStep";
 export const cdnaDisplayTool: Tool = {
   id: "cdna-display",
   name: "cDNA-DISPLAY Analyzer",
+  shortName: "cDNA-display",
   description:
     "Demultiplex + enrichment of cDNA/mRNA-display NGS selection rounds, streamed in-browser.",
   icon: Dna,
@@ -24,4 +26,6 @@ export const cdnaDisplayTool: Tool = {
     { id: "run", label: "Run", blurb: "Demultiplex + analyze", Component: RunStep },
     { id: "results", label: "Results", blurb: "Download", Component: ResultsStep },
   ],
+  useCurrentStep: () => useRunStore((s) => s.currentStep),
+  useSetStep: () => useRunStore((s) => s.setStep),
 };
