@@ -44,8 +44,15 @@ function buildPanel(
   src: string,
   dest: string,
   label: string,
+  totalsByRound: Record<string, number>,
 ): Panel {
-  const tests = computeEnrichmentTests(rows, src, dest);
+  const tests = computeEnrichmentTests(
+    rows,
+    src,
+    dest,
+    totalsByRound[src] ?? 0,
+    totalsByRound[dest] ?? 0,
+  );
   let sig = 0;
   const allPoints: VolcanoPoint[] = tests.map((t) => {
     const significant = t.fdr < FDR_THRESHOLD && t.log2FC > LFC_THRESHOLD;
@@ -89,23 +96,34 @@ function buildPanel(
 
 interface Props {
   rows: ReadonlyArray<PeptideRecord>;
+  /** Round name → passed_qc total. The p-value's library-size denominator
+   *  comes from here, NOT from summing the (possibly capped) rows. */
+  totalsByRound: Record<string, number>;
   roundNames: ReadonlyArray<string>;
 }
 
-export function VolcanoPlot({ rows, roundNames }: Props) {
+export function VolcanoPlot({ rows, totalsByRound, roundNames }: Props) {
   const panels = useMemo<Panel[]>(() => {
     if (rows.length === 0 || roundNames.length < 2) return [];
     const out: Panel[] = [];
     for (let i = 1; i < roundNames.length; i++) {
-      out.push(buildPanel(rows, roundNames[i - 1]!, roundNames[i]!, "Stepwise"));
+      out.push(
+        buildPanel(rows, roundNames[i - 1]!, roundNames[i]!, "Stepwise", totalsByRound),
+      );
     }
     if (roundNames.length >= 3) {
       out.push(
-        buildPanel(rows, roundNames[0]!, roundNames[roundNames.length - 1]!, "Global"),
+        buildPanel(
+          rows,
+          roundNames[0]!,
+          roundNames[roundNames.length - 1]!,
+          "Global",
+          totalsByRound,
+        ),
       );
     }
     return out;
-  }, [rows, roundNames]);
+  }, [rows, totalsByRound, roundNames]);
 
   if (panels.length === 0) {
     return (

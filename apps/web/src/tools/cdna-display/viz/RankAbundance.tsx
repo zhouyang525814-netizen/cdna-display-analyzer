@@ -23,7 +23,6 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
-import type { PeptideRecord } from "./csvParse";
 
 const PALETTE = [
   "hsl(188 78% 41%)", // teal-600 — primary
@@ -37,7 +36,12 @@ const PALETTE = [
 const TARGET_POINTS = 200;
 
 interface Props {
-  rows: ReadonlyArray<PeptideRecord>;
+  /** Round name → sorted-descending list of per-peptide read counts in that
+   *  round. Length is the number of distinct peptides observed in the round —
+   *  the whole library, not a top-N slice. */
+  countsByRound: Record<string, number[]>;
+  /** Round name → total reads = passed_qc. Used to normalise counts → RPM. */
+  totalsByRound: Record<string, number>;
   roundNames: ReadonlyArray<string>;
 }
 
@@ -96,19 +100,20 @@ interface MergedPoint {
   [round: string]: number | null;
 }
 
-export function RankAbundance({ rows, roundNames }: Props) {
+export function RankAbundance({ countsByRound, totalsByRound, roundNames }: Props) {
   const data = useMemo(() => {
-    if (rows.length === 0 || roundNames.length === 0) {
+    if (roundNames.length === 0) {
       return { points: [] as MergedPoint[], summaries: [] as RoundSummary[] };
     }
 
     const seriesByRound: Record<string, number[]> = {};
     const summaries: RoundSummary[] = [];
     for (const round of roundNames) {
-      const rpms = rows
-        .map((r) => r.rpm[round] ?? 0)
-        .filter((v) => v > 0)
-        .sort((a, b) => b - a);
+      const counts = countsByRound[round] ?? [];
+      const total = totalsByRound[round] ?? 0;
+      // counts are already sorted descending by the upstream parser. Convert
+      // to RPM in-place — we own this array (returned fresh by the parser).
+      const rpms = total > 0 ? counts.map((c) => (c / total) * 1e6) : [];
       seriesByRound[round] = rpms;
       const slope = powerLawSlope(rpms);
       summaries.push({
@@ -141,7 +146,7 @@ export function RankAbundance({ rows, roundNames }: Props) {
     });
 
     return { points, summaries };
-  }, [rows, roundNames]);
+  }, [countsByRound, totalsByRound, roundNames]);
 
   if (data.summaries.every((s) => s.n === 0)) {
     return (

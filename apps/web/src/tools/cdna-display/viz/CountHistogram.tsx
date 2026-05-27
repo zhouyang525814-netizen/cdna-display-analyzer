@@ -22,10 +22,12 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
-import type { PeptideRecord } from "./csvParse";
 
 interface Props {
-  rows: ReadonlyArray<PeptideRecord>;
+  /** Round name → sorted-descending per-peptide counts. We only need the
+   *  counts themselves (not peptide identities) to bin them, so the parser
+   *  passes us pure number[] arrays — full library, not top-N sliced. */
+  countsByRound: Record<string, number[]>;
   roundNames: ReadonlyArray<string>;
 }
 
@@ -40,28 +42,36 @@ interface RoundHistogram {
 
 const BIN_COUNT = 24;
 
-function computeHistogram(round: string, rows: ReadonlyArray<PeptideRecord>): RoundHistogram | null {
+function computeHistogram(round: string, counts: ReadonlyArray<number>): RoundHistogram | null {
   // log10 of the count for each peptide that has at least one read in this round.
-  const logs: number[] = [];
-  for (const r of rows) {
-    const c = r.count[round];
-    if (c != null && c > 0) logs.push(Math.log10(c));
+  const logs = new Array<number>(counts.length);
+  let n = 0;
+  for (const c of counts) {
+    if (c > 0) logs[n++] = Math.log10(c);
   }
-  if (logs.length === 0) return null;
+  logs.length = n;
+  if (n === 0) return null;
 
-  const min = Math.min(...logs);
-  const max = Math.max(...logs);
+  // Loop-based min/max — Math.min(...logs) overflows the call stack at ~100k
+  // elements and we routinely see >500k peptides per round on deep runs.
+  let min = logs[0]!;
+  let max = logs[0]!;
+  for (let i = 1; i < logs.length; i++) {
+    const v = logs[i]!;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
   // Guard: when all peptides have the same count (e.g. all = 1) histogram
   // collapses to one bin; widen artificially so the chart still renders.
   const lo = min === max ? min - 0.5 : min;
   const hi = min === max ? max + 0.5 : max;
   const step = (hi - lo) / BIN_COUNT;
 
-  const counts = new Array(BIN_COUNT).fill(0);
+  const binCounts = new Array<number>(BIN_COUNT).fill(0);
   for (const v of logs) {
     let idx = Math.floor((v - lo) / step);
     if (idx === BIN_COUNT) idx = BIN_COUNT - 1; // edge case for max
-    if (idx >= 0 && idx < BIN_COUNT) counts[idx]++;
+    if (idx >= 0 && idx < BIN_COUNT) binCounts[idx]!++;
   }
 
   // Gaussian fit on the log-transformed data.
@@ -72,7 +82,7 @@ function computeHistogram(round: string, rows: ReadonlyArray<PeptideRecord>): Ro
 
   const fitOk = logs.length >= 5 && stdLog > 0;
 
-  const bins = counts.map((bc, i) => {
+  const bins = binCounts.map((bc, i) => {
     const x = lo + step * (i + 0.5);
     // Gaussian PDF in log space, scaled to histogram counts (N * step is
     // the area under the binned histogram; PDF * (N * step) ≈ bin count).
@@ -88,10 +98,13 @@ function computeHistogram(round: string, rows: ReadonlyArray<PeptideRecord>): Ro
   return { round, bins, totalPeptides: logs.length, meanLog, stdLog };
 }
 
-export function CountHistogram({ rows, roundNames }: Props) {
+export function CountHistogram({ countsByRound, roundNames }: Props) {
   const histos = useMemo(
-    () => roundNames.map((r) => computeHistogram(r, rows)).filter((h): h is RoundHistogram => h != null),
-    [rows, roundNames],
+    () =>
+      roundNames
+        .map((r) => computeHistogram(r, countsByRound[r] ?? []))
+        .filter((h): h is RoundHistogram => h != null),
+    [countsByRound, roundNames],
   );
 
   if (histos.length === 0) {

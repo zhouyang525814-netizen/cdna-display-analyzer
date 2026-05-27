@@ -133,21 +133,19 @@ export interface EnrichmentResult {
   fdr: number;
 }
 
-/** Compute right-tail enrichment p-values + BH-FDR for every peptide. */
+/** Compute right-tail enrichment p-values + BH-FDR for every peptide.
+ *
+ *  Pass `nSrc` / `nDest` explicitly (total reads = passed_qc per round). The
+ *  upstream `parseEnrichmentMatrix` caller may have truncated the rows for
+ *  perf, so summing `rows[i].count[*]` here would underestimate the library
+ *  size and inflate every p-value. */
 export function computeEnrichmentTests(
   rows: ReadonlyArray<PeptideRecord>,
   srcRound: string,
   destRound: string,
+  nSrc: number,
+  nDest: number,
 ): EnrichmentResult[] {
-  // Library size = total counts across all peptides in this round. Equivalent
-  // to passed_qc once we sum across the matrix (which is exactly how the
-  // analyzer normalises RPM upstream).
-  let nSrc = 0;
-  let nDest = 0;
-  for (const r of rows) {
-    nSrc += r.count[srcRound] ?? 0;
-    nDest += r.count[destRound] ?? 0;
-  }
   if (nSrc === 0 || nDest === 0) return [];
 
   const pvals = new Array<number>(rows.length);

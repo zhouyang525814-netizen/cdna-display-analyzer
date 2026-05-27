@@ -115,3 +115,97 @@ export function parseEnrichmentMatrix(csv: string, limit?: number): ParsedMatrix
 
   return { rows, roundNames };
 }
+
+export interface PerRoundCounts {
+  /** Round name → sorted-descending array of per-peptide counts. Length = number
+   *  of distinct peptides observed in that round (peptides with count 0 are
+   *  excluded). */
+  countsByRound: Record<string, number[]>;
+  /** Round name → total reads passing QC (= sum of counts). This is the same
+   *  value RPM normalisation uses upstream. */
+  totalsByRound: Record<string, number>;
+  /** Round names in CSV column order. */
+  roundNames: string[];
+}
+
+/** Streaming pass over the analyzer CSV that pulls *only* the per-round Count
+ *  columns into compact number arrays — no PeptideRecord objects, no row cap.
+ *  Used by viz components that need to see the full per-round distribution
+ *  (rank-abundance, count histogram) without being biased by the matrix sort
+ *  + top-N cap that `parseEnrichmentMatrix` uses for the per-peptide UI.
+ *
+ *  Memory: O(unique peptides × rounds) numbers. For a 500k-peptide library
+ *  with 4 rounds that's ~16 MB — fine on commodity hardware. */
+export function parsePerRoundCounts(csv: string): PerRoundCounts {
+  const empty: PerRoundCounts = { countsByRound: {}, totalsByRound: {}, roundNames: [] };
+  if (!csv) return empty;
+
+  const headerEnd = csv.indexOf("\n");
+  if (headerEnd === -1) return empty;
+  const headers = csv.slice(0, headerEnd).split(",");
+
+  const countCols: { round: string; idx: number }[] = [];
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i]!;
+    if (h.startsWith("Count_")) {
+      countCols.push({ round: h.slice("Count_".length), idx: i });
+    }
+  }
+  if (countCols.length === 0) return empty;
+
+  const countsByRound: Record<string, number[]> = {};
+  const totalsByRound: Record<string, number> = {};
+  for (const { round } of countCols) {
+    countsByRound[round] = [];
+    totalsByRound[round] = 0;
+  }
+
+  const maxIdx = countCols.reduce((m, c) => Math.max(m, c.idx), 0);
+  const csvLen = csv.length;
+  let lineStart = headerEnd + 1;
+  while (lineStart < csvLen) {
+    const lineEnd = csv.indexOf("\n", lineStart);
+    const end = lineEnd === -1 ? csvLen : lineEnd;
+    if (end <= lineStart) {
+      if (lineEnd === -1) break;
+      lineStart = lineEnd + 1;
+      continue;
+    }
+    // Walk commas manually — only collect the cells we actually need. This
+    // avoids allocating an N-element array per row when N can be 15+.
+    const cellStarts = new Array<number>(maxIdx + 2);
+    cellStarts[0] = lineStart;
+    let col = 1;
+    for (let i = lineStart; i < end && col <= maxIdx + 1; i++) {
+      if (csv.charCodeAt(i) === 44) { // ','
+        cellStarts[col++] = i + 1;
+      }
+    }
+    cellStarts[col] = end + 1;
+
+    for (const { round, idx } of countCols) {
+      const s = cellStarts[idx];
+      const e = cellStarts[idx + 1];
+      if (s == null || e == null) continue;
+      // e is the position *after* the comma → real cell end is e - 1.
+      const v = Number(csv.slice(s, e - 1));
+      if (Number.isFinite(v) && v > 0) {
+        countsByRound[round]!.push(v);
+        totalsByRound[round]! += v;
+      }
+    }
+
+    if (lineEnd === -1) break;
+    lineStart = lineEnd + 1;
+  }
+
+  for (const round of Object.keys(countsByRound)) {
+    countsByRound[round]!.sort((a, b) => b - a);
+  }
+
+  return {
+    countsByRound,
+    totalsByRound,
+    roundNames: countCols.map((c) => c.round),
+  };
+}

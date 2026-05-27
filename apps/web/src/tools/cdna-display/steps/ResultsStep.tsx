@@ -11,7 +11,10 @@ import { EnrichmentScatter } from "@/tools/cdna-display/viz/EnrichmentScatter";
 import { RankAbundance } from "@/tools/cdna-display/viz/RankAbundance";
 import { SequenceLogo } from "@/tools/cdna-display/viz/SequenceLogo";
 import { VolcanoPlot } from "@/tools/cdna-display/viz/VolcanoPlot";
-import { parseEnrichmentMatrix } from "@/tools/cdna-display/viz/csvParse";
+import {
+  parseEnrichmentMatrix,
+  parsePerRoundCounts,
+} from "@/tools/cdna-display/viz/csvParse";
 
 export function ResultsStep() {
   const state = useRunStore();
@@ -55,11 +58,20 @@ export function ResultsStep() {
   }, [outcome.csvBlob]);
   const topPeptides = useMemo(() => parseTopPeptides(csvText, 20), [csvText]);
 
-  // Full matrix parse for the visualization stack. We cap at 50,000 rows —
-  // far above any realistic peptide diversity for this assay, and keeps the
-  // main-thread work bounded if someone feeds in a freakishly diverse run.
+  // Two parses serve different needs:
+  //  - `parsedMatrix` is capped at 50k rows because the per-peptide UI
+  //    (volcano, scatter, top-20 table, sequence logo) only ever needs the
+  //    most-enriched head; the analyzer already sorts by global enrichment.
+  //  - `perRoundCounts` walks the full CSV and pulls *only* the Count_*
+  //    columns into compact number arrays. That keeps the rank-abundance
+  //    plot and read-count histogram honest about the whole library — those
+  //    summaries are meaningless if biased by an enrichment-sorted top-N.
   const parsedMatrix = useMemo(
     () => parseEnrichmentMatrix(csvText ?? "", 50_000),
+    [csvText],
+  );
+  const perRoundCounts = useMemo(
+    () => parsePerRoundCounts(csvText ?? ""),
     [csvText],
   );
 
@@ -169,8 +181,9 @@ export function ResultsStep() {
           </CardHeader>
           <CardContent>
             <RankAbundance
-              rows={parsedMatrix.rows}
-              roundNames={parsedMatrix.roundNames}
+              countsByRound={perRoundCounts.countsByRound}
+              totalsByRound={perRoundCounts.totalsByRound}
+              roundNames={perRoundCounts.roundNames}
             />
           </CardContent>
         </Card>
@@ -189,8 +202,8 @@ export function ResultsStep() {
           </CardHeader>
           <CardContent>
             <CountHistogram
-              rows={parsedMatrix.rows}
-              roundNames={parsedMatrix.roundNames}
+              countsByRound={perRoundCounts.countsByRound}
+              roundNames={perRoundCounts.roundNames}
             />
           </CardContent>
         </Card>
@@ -252,6 +265,7 @@ export function ResultsStep() {
           <CardContent>
             <VolcanoPlot
               rows={parsedMatrix.rows}
+              totalsByRound={perRoundCounts.totalsByRound}
               roundNames={parsedMatrix.roundNames}
             />
           </CardContent>

@@ -13,6 +13,8 @@
   "dependencies": {
     "@cdna/core": "workspace:*",
     "@cdna/types": "workspace:*",
+    "@fontsource/ibm-plex-mono": "^5.2.7",
+    "@fontsource/ibm-plex-sans": "^5.2.8",
     "@radix-ui/react-label": "^2.1.0",
     "@radix-ui/react-progress": "^1.1.0",
     "@radix-ui/react-slot": "^1.1.0",
