@@ -18,6 +18,7 @@ import {
 } from "recharts";
 import type { PeptideRecord } from "./csvParse";
 import { computeEnrichmentTests } from "./stats";
+import { ChartPanel } from "./ChartPanel";
 
 const FDR_THRESHOLD = 0.05;
 const LFC_THRESHOLD = 1;
@@ -142,6 +143,36 @@ export function VolcanoPlot({ rows, totalsByRound, roundNames }: Props) {
   );
 }
 
+function VolcanoTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: VolcanoPoint }>;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const p = payload[0]?.payload;
+  if (!p) return null;
+  return (
+    <div className="rounded-md border bg-background/95 px-2.5 py-2 text-[11px] shadow-md backdrop-blur-sm">
+      <div className="break-all font-mono text-xs font-semibold text-foreground">{p.peptide}</div>
+      <div className="mt-1 space-y-0.5 text-muted-foreground">
+        <div>
+          log₂FC ={" "}
+          <span className="font-mono tabular-nums text-foreground">{p.x.toFixed(2)}</span>
+        </div>
+        <div>
+          FDR ={" "}
+          <span className="font-mono tabular-nums text-foreground">{p.fdr.toExponential(2)}</span>
+        </div>
+        {p.significant ? (
+          <div className="font-medium text-destructive">significant</div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function VolcanoPanel({ panel }: { panel: Panel }) {
   const sig = panel.points.filter((p) => p.significant);
   const bg = panel.points.filter((p) => !p.significant);
@@ -149,6 +180,8 @@ function VolcanoPanel({ panel }: { panel: Panel }) {
   const absMaxX = Math.max(2, ...panel.points.map((p) => Math.abs(p.x)));
   const maxY = Math.max(2, ...panel.points.map((p) => p.y));
   const cutoffY = -Math.log10(FDR_THRESHOLD);
+  // Slug-safe filename for the download: "Stepwise: R1 vs R0" → "volcano_Stepwise_R1_vs_R0"
+  const filename = `volcano_${panel.title.replace(/[^a-zA-Z0-9]+/g, "_")}`;
 
   return (
     <div>
@@ -159,7 +192,7 @@ function VolcanoPanel({ panel }: { panel: Panel }) {
           FDR &lt; {FDR_THRESHOLD} &amp; log₂FC &gt; {LFC_THRESHOLD}
         </span>
       </div>
-      <div className="h-[300px]">
+      <ChartPanel filename={filename} className="h-[300px]">
         <ResponsiveContainer width="100%" height="100%">
           <ScatterChart margin={{ top: 8, right: 16, bottom: 28, left: 8 }}>
             <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="2 2" />
@@ -204,26 +237,7 @@ function VolcanoPanel({ panel }: { panel: Panel }) {
               strokeDasharray="3 3"
               strokeWidth={1}
             />
-            <Tooltip
-              cursor={{ strokeDasharray: "3 3" }}
-              contentStyle={{
-                background: "hsl(var(--background))",
-                border: "1px solid hsl(var(--border))",
-                borderRadius: 6,
-                fontSize: 11,
-              }}
-              formatter={(value, key, item) => {
-                const payload = (item as { payload?: VolcanoPoint }).payload;
-                const v = Number(value);
-                if (key === "x") return [v.toFixed(2), "log₂FC"];
-                if (key === "y") {
-                  const fdr = payload?.fdr ?? 1;
-                  return [fdr.toExponential(2), "FDR"];
-                }
-                return String(value);
-              }}
-              labelFormatter={() => ""}
-            />
+            <Tooltip content={<VolcanoTooltip />} cursor={{ strokeDasharray: "3 3" }} />
             <Scatter
               name="Not significant"
               data={bg}
@@ -242,7 +256,7 @@ function VolcanoPanel({ panel }: { panel: Panel }) {
             </Scatter>
           </ScatterChart>
         </ResponsiveContainer>
-      </div>
+      </ChartPanel>
     </div>
   );
 }

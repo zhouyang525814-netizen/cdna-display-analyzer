@@ -14,6 +14,7 @@
 import { useMemo } from "react";
 import { Sankey, Tooltip, ResponsiveContainer } from "recharts";
 import type { PipelineOutcome } from "@/worker/types";
+import { ChartPanel } from "./ChartPanel";
 
 interface SankeyNode {
   name: string;
@@ -145,27 +146,29 @@ export function FilterFunnelSankey({ outcome }: { outcome: PipelineOutcome }) {
   const height = Math.max(280, data.nodes.length * 18);
 
   return (
-    <div className="w-full" style={{ height }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <Sankey
-          data={data}
-          nodePadding={14}
-          nodeWidth={12}
-          margin={{ left: 110, right: 130, top: 8, bottom: 8 }}
-          link={{ stroke: "hsl(var(--muted-foreground))", strokeOpacity: 0.15 }}
-          node={SankeyNodeRect as never}
-        >
-          <Tooltip
-            formatter={(value) => Number(value).toLocaleString()}
-            contentStyle={{
-              background: "hsl(var(--background))",
-              border: "1px solid hsl(var(--border))",
-              borderRadius: 6,
-              fontSize: 12,
-            }}
-          />
-        </Sankey>
-      </ResponsiveContainer>
-    </div>
+    <ChartPanel filename="filter_funnel_sankey" className="w-full" >
+      <div style={{ height }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <Sankey
+            data={data}
+            nodePadding={14}
+            nodeWidth={12}
+            margin={{ left: 110, right: 130, top: 8, bottom: 8 }}
+            link={{ stroke: "hsl(var(--muted-foreground))", strokeOpacity: 0.15 }}
+            node={SankeyNodeRect as never}
+          >
+            <Tooltip
+              formatter={(value) => Number(value).toLocaleString()}
+              contentStyle={{
+                background: "hsl(var(--background))",
+                border: "1px solid hsl(var(--border))",
+                borderRadius: 6,
+                fontSize: 12,
+              }}
+            />
+          </Sankey>
+        </ResponsiveContainer>
+      </div>
+    </ChartPanel>
   );
 }

@@ -23,6 +23,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
   Tooltip, Legend, ResponsiveContainer,
 } from "recharts";
+import { ChartPanel } from "./ChartPanel";
 
 const PALETTE = [
   "hsl(188 78% 41%)", // teal-600 — primary
@@ -179,7 +180,7 @@ export function RankAbundance({ countsByRound, totalsByRound, roundNames }: Prop
           </div>
         ))}
       </div>
-      <div className="h-[300px]">
+      <ChartPanel filename="rank_abundance" className="h-[300px]">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart
             data={data.points}
@@ -244,7 +245,7 @@ export function RankAbundance({ countsByRound, totalsByRound, roundNames }: Prop
             ))}
           </LineChart>
         </ResponsiveContainer>
-      </div>
+      </ChartPanel>
     </div>
   );
 }

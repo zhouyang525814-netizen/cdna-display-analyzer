@@ -31,6 +31,38 @@ export function App() {
       <main className="mx-auto max-w-7xl px-4 py-8">
         {ActiveStep ? <ActiveStep /> : null}
       </main>
+
+      <SiteFooter />
     </div>
+  );
+}
+
+function SiteFooter() {
+  return (
+    <footer className="border-t bg-muted/30">
+      <div className="mx-auto max-w-6xl px-4 py-6 text-center text-xs text-muted-foreground">
+        <div className="text-sm font-medium text-foreground">Zhouyang Zhou</div>
+        <div className="mt-0.5">Nagoya University</div>
+        <div className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+          <a
+            href="https://molbiotech.wixsite.com/molbiotech"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline-offset-2 transition-colors hover:text-foreground hover:underline"
+          >
+            Lab website
+          </a>
+          <span aria-hidden="true">·</span>
+          <a
+            href="https://github.com/zhouyang525814-netizen/cdna-display-analyzer"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline-offset-2 transition-colors hover:text-foreground hover:underline"
+          >
+            Source on GitHub
+          </a>
+        </div>
+      </div>
+    </footer>
   );
 }

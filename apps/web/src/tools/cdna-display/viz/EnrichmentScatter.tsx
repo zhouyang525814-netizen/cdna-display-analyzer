@@ -24,6 +24,7 @@ import {
   Cell,
 } from "recharts";
 import type { PeptideRecord } from "./csvParse";
+import { ChartPanel } from "./ChartPanel";
 
 const MAX_POINTS = 2000;
 const HIGHLIGHT_TOP = 50;
@@ -139,6 +140,38 @@ export function EnrichmentScatter({ rows, roundNames }: Props) {
   );
 }
 
+function ScatterTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload?: ScatterPoint }>;
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const p = payload[0]?.payload;
+  if (!p) return null;
+  return (
+    <div className="rounded-md border bg-background/95 px-2.5 py-2 text-[11px] shadow-md backdrop-blur-sm">
+      <div className="break-all font-mono text-xs font-semibold text-foreground">{p.peptide}</div>
+      <div className="mt-1 space-y-0.5 text-muted-foreground">
+        <div>
+          log₁₀(earlier) ={" "}
+          <span className="font-mono tabular-nums text-foreground">{p.x.toFixed(2)}</span>
+        </div>
+        <div>
+          log₁₀(later) ={" "}
+          <span className="font-mono tabular-nums text-foreground">{p.y.toFixed(2)}</span>
+        </div>
+        <div>
+          enrichment ={" "}
+          <span className="font-mono tabular-nums text-foreground">{p.enrich.toFixed(2)}</span>
+        </div>
+        {p.highlighted ? <div className="font-medium text-destructive">top hit</div> : null}
+      </div>
+    </div>
+  );
+}
+
 function ScatterPanel({ panel }: { panel: Panel }) {
   // Recharts needs the data flat — we pre-split highlighted from background
   // so they render in two layers (background underneath, highlights on top).
@@ -149,6 +182,7 @@ function ScatterPanel({ panel }: { panel: Panel }) {
     1,
     ...panel.points.map((p) => Math.max(p.x, p.y)),
   );
+  const filename = `scatter_${panel.title.replace(/[^a-zA-Z0-9]+/g, "_")}`;
 
   return (
     <div>
@@ -161,7 +195,7 @@ function ScatterPanel({ panel }: { panel: Panel }) {
           )}
         </span>
       </div>
-      <div className="h-[280px]">
+      <ChartPanel filename={filename} className="h-[280px]">
         <ResponsiveContainer width="100%" height="100%">
           <ScatterChart margin={{ top: 8, right: 16, bottom: 28, left: 8 }}>
             <CartesianGrid stroke="hsl(var(--border))" strokeDasharray="2 2" />
@@ -204,21 +238,7 @@ function ScatterPanel({ panel }: { panel: Panel }) {
               strokeDasharray="3 3"
               strokeWidth={1}
             />
-            <Tooltip
-              cursor={{ strokeDasharray: "3 3" }}
-              contentStyle={{
-                background: "hsl(var(--background))",
-                border: "1px solid hsl(var(--border))",
-                borderRadius: 6,
-                fontSize: 11,
-              }}
-              formatter={(v, key) => {
-                const n = Number(v);
-                if (key === "x" || key === "y" || key === "enrich") return n.toFixed(2);
-                return String(v);
-              }}
-              labelFormatter={() => ""}
-            />
+            <Tooltip content={<ScatterTooltip />} cursor={{ strokeDasharray: "3 3" }} />
             <Scatter
               name="Background"
               data={background}
@@ -237,7 +257,7 @@ function ScatterPanel({ panel }: { panel: Panel }) {
             />
           </ScatterChart>
         </ResponsiveContainer>
-      </div>
+      </ChartPanel>
     </div>
   );
 }

@@ -22,6 +22,7 @@ import {
   Legend,
   ResponsiveContainer,
 } from "recharts";
+import { ChartPanel } from "./ChartPanel";
 
 interface Props {
   /** Round name → sorted-descending per-peptide counts. We only need the
@@ -129,7 +130,7 @@ export function CountHistogram({ countsByRound, roundNames }: Props) {
               σ(log₁₀) = {h.stdLog.toFixed(2)}
             </span>
           </div>
-          <div className="h-[200px]">
+          <ChartPanel filename={`count_histogram_${h.round}`} className="h-[200px]">
             <ResponsiveContainer width="100%" height="100%">
               <ComposedChart
                 data={h.bins}
@@ -179,7 +180,7 @@ export function CountHistogram({ countsByRound, roundNames }: Props) {
                 />
               </ComposedChart>
             </ResponsiveContainer>
-          </div>
+          </ChartPanel>
         </div>
       ))}
     </div>

@@ -18,6 +18,7 @@
 
 import { useMemo } from "react";
 import type { PeptideRecord } from "./csvParse";
+import { ChartPanel } from "./ChartPanel";
 
 const TOP_N_PER_ROUND = 100;
 const MAX_LENGTH = 32; // truncate ultra-long peptides so the logo stays readable
@@ -146,7 +147,9 @@ export function SequenceLogo({ rows, roundNames }: Props) {
                 top {TOP_N_PER_ROUND} · {l.aligned.toLocaleString()} aligned at {l.modalLength} aa
               </span>
             </div>
-            <LogoSvg logo={l} />
+            <ChartPanel filename={`sequence_logo_${l.round}`}>
+              <LogoSvg logo={l} />
+            </ChartPanel>
           </div>
         ),
       )}
