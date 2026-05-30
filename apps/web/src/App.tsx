@@ -2,6 +2,7 @@
 // top-of-page tool switcher that routes between cDNA-DISPLAY and Nanopore SSM
 // (and any future sibling tools listed in tools/registry.ts).
 
+import { useEffect } from "react";
 import { Stepper } from "@/components/Stepper";
 import { useAppStore } from "@/state/useAppStore";
 import { tools, toolById } from "@/tools/registry";
@@ -10,6 +11,12 @@ export function App() {
   const activeToolId = useAppStore((s) => s.activeToolId);
   const setActiveTool = useAppStore((s) => s.setActiveTool);
   const tool = toolById(activeToolId);
+  // Mirror the active tool id onto <html data-tool="..."> so the per-tool CSS
+  // variable overrides in index.css take effect. Any element under <html>
+  // automatically picks up the swap — no per-component theming code needed.
+  useEffect(() => {
+    document.documentElement.dataset.tool = activeToolId;
+  }, [activeToolId]);
   // Each tool owns its own currentStep field (cdna-display uses useRunStore,
   // nanopore-ssm uses useNanoporeStore). The Tool definition optionally
   // provides a hook to read the active step; if absent we use the first step.

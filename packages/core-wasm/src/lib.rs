@@ -1,13 +1,18 @@
-// WASM hot-path for the demultiplex pipeline. Three exports:
-//   - `Scorer`: holds per-round (fw_anchor, fw_barcode) pairs and produces a
-//     ScoreResult for a given read in a single Rust call (one wasm boundary
-//     crossing per read, not per round). This replaces the inner loop of
-//     packages/core/src/demultiplex.ts::processRead.
-//   - `reverse_complement`: bytes → bytes, used for the RC retry branch.
-//   - `mean_phred`: pre-demultiplex quality filter.
+// WASM hot-path. Two pipelines share this crate:
 //
-// All three keep semantics byte-identical to the TS reference so the parity
-// test stays green when the WASM-backed path is in use.
+// cDNA-DISPLAY (Phase 1–2):
+//   - `Scorer`: per-round (fw_anchor, fw_barcode) scoring for the cDNA tool.
+//   - `reverse_complement`, `mean_phred`: shared helpers.
+//
+// Nanopore SSM (Phase 6.2b):
+//   - `DualAnchorScorer`: per-site (fw_anchor, rv_anchor) banded-tolerant
+//     extraction. Locates the inter-anchor ROI in a Nanopore read with
+//     up to `max_subs + max_indels` edits per anchor.
+//   - `bandedAlign` (free function, exported for tests + the TS engine's
+//     direct-call path when WASM is enabled).
+//
+// All semantics mirror the TS reference (packages/core/src/) so parity tests
+// stay byte-identical regardless of which path runs.
 
 use wasm_bindgen::prelude::*;
 use js_sys::Float64Array;
@@ -152,6 +157,225 @@ pub fn mean_phred(qual: &[u8]) -> f64 {
     }
     (sum as f64) / (qual.len() as f64)
 }
+
+// --- Nanopore SSM: banded approximate matcher + DualAnchorScorer ---------
+//
+// `banded_align` mirrors banded-align.ts. Used twice per site per read to
+// locate the upstream + downstream anchors with Nanopore-class error tolerance.
+
+/// One hit result. None when no alignment within tolerance was found.
+#[derive(Clone, Copy)]
+struct MatchResult {
+    start: usize,
+    end: usize,
+    score: u32,
+}
+
+/// Banded approximate string match. Mirrors TS `bandedAlign` semantics:
+///   - tolerance = max_subs + max_indels (combined edit budget)
+///   - alignment-length band: window in [m - max_indels, m + max_indels]
+///   - returns lowest-score hit; tie-break: earlier start wins, then shorter length
+fn banded_align(
+    haystack: &[u8],
+    needle: &[u8],
+    max_subs: usize,
+    max_indels: usize,
+) -> Option<MatchResult> {
+    let tolerance = max_subs + max_indels;
+    let m = needle.len();
+    if m == 0 || haystack.is_empty() {
+        return None;
+    }
+    let min_len = if m > max_indels { m - max_indels } else { 1 };
+    let min_len = min_len.max(1);
+    let max_len = m + max_indels;
+    let h_len = haystack.len();
+    if h_len < min_len {
+        return None;
+    }
+
+    let mut best: Option<MatchResult> = None;
+    let max_start = h_len - min_len;
+    for start in 0..=max_start {
+        let mut len = min_len;
+        while len <= max_len {
+            let end = start + len;
+            if end > h_len {
+                break;
+            }
+            if let Some(dist) = limited_edit_distance(needle, &haystack[start..end], tolerance) {
+                let is_better = match &best {
+                    None => true,
+                    Some(b) => {
+                        dist < b.score
+                            || (dist == b.score
+                                && (start < b.start || (start == b.start && len < (b.end - b.start))))
+                    }
+                };
+                if is_better {
+                    best = Some(MatchResult { start, end, score: dist });
+                    if dist == 0 {
+                        return best;
+                    }
+                }
+            }
+            len += 1;
+        }
+    }
+    best
+}
+
+/// Wagner-Fischer edit distance with row rolling + early termination when the
+/// row minimum exceeds `limit`. Returns None if exceeded.
+fn limited_edit_distance(needle: &[u8], hay: &[u8], limit: usize) -> Option<u32> {
+    let n = needle.len();
+    let m = hay.len();
+    if n.abs_diff(m) > limit {
+        return None;
+    }
+    let limit32 = limit as u32;
+
+    let mut prev: Vec<u32> = (0..=m as u32).collect();
+    let mut curr: Vec<u32> = vec![0u32; m + 1];
+
+    for i in 1..=n {
+        curr[0] = i as u32;
+        let mut row_min = curr[0];
+        let ni = needle[i - 1];
+        for j in 1..=m {
+            let cost = if ni == hay[j - 1] { 0 } else { 1 };
+            let diag = prev[j - 1].saturating_add(cost);
+            let up = prev[j].saturating_add(1);
+            let left = curr[j - 1].saturating_add(1);
+            let v = diag.min(up).min(left);
+            curr[j] = v;
+            if v < row_min {
+                row_min = v;
+            }
+        }
+        if row_min > limit32 {
+            return None;
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+
+    let final_dist = prev[m];
+    if final_dist <= limit32 {
+        Some(final_dist)
+    } else {
+        None
+    }
+}
+
+/// Exported flat-API wrapper for the TS test suite to verify Rust↔TS parity.
+/// Returns a 4-element Float64Array: [found ? 1 : 0, start, end, score].
+/// found==0 sets start/end/score to -1.
+#[wasm_bindgen(js_name = bandedAlign)]
+pub fn banded_align_wasm(haystack: &[u8], needle: &[u8], max_subs: usize, max_indels: usize) -> Vec<f64> {
+    match banded_align(haystack, needle, max_subs, max_indels) {
+        Some(m) => vec![1.0, m.start as f64, m.end as f64, m.score as f64],
+        None => vec![0.0, -1.0, -1.0, -1.0],
+    }
+}
+
+struct SiteData {
+    fw_anchor: Vec<u8>,
+    rv_anchor: Vec<u8>,
+}
+
+/// Per-site dual-anchor scorer. Each call to `score(seq)` writes 5 fields
+/// per configured site into the internal result buffer:
+///
+///   [base + 0] = found ? 1 : 0   (both anchors located)
+///   [base + 1] = fw_start        (-1 if not found)
+///   [base + 2] = fw_end
+///   [base + 3] = rv_start
+///   [base + 4] = rv_end
+///
+/// where `base = 5 * site_index`. The downstream anchor is searched only
+/// from `fw_end` onward, so it is guaranteed to sit after the upstream anchor.
+#[wasm_bindgen]
+pub struct DualAnchorScorer {
+    sites: Vec<SiteData>,
+    max_subs: usize,
+    max_indels: usize,
+    result: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl DualAnchorScorer {
+    #[wasm_bindgen(constructor)]
+    pub fn new(max_subs: usize, max_indels: usize) -> Self {
+        Self {
+            sites: Vec::new(),
+            max_subs,
+            max_indels,
+            result: Vec::new(),
+        }
+    }
+
+    /// Register one site. Order matters — site index is the row index in the
+    /// per-call result buffer. Returns the new site index.
+    #[wasm_bindgen(js_name = addSite)]
+    pub fn add_site(&mut self, fw_anchor: Vec<u8>, rv_anchor: Vec<u8>) -> usize {
+        let idx = self.sites.len();
+        self.sites.push(SiteData { fw_anchor, rv_anchor });
+        for _ in 0..5 {
+            self.result.push(0.0);
+        }
+        idx
+    }
+
+    /// Returns a Float64Array view onto the internal result buffer. Length is
+    /// `5 * site_count`. See struct doc for layout.
+    #[wasm_bindgen(js_name = resultView)]
+    pub fn result_view(&self) -> Float64Array {
+        unsafe { Float64Array::view(&self.result) }
+    }
+
+    /// Score one read against every configured site. Writes results in-place
+    /// into the buffer aliased by `resultView()`.
+    pub fn score(&mut self, seq: &[u8]) {
+        for (i, site) in self.sites.iter().enumerate() {
+            let base = 5 * i;
+            let fw = banded_align(seq, &site.fw_anchor, self.max_subs, self.max_indels);
+            let pair = if let Some(fwm) = fw {
+                if fwm.end >= seq.len() {
+                    None
+                } else {
+                    let tail = &seq[fwm.end..];
+                    banded_align(tail, &site.rv_anchor, self.max_subs, self.max_indels)
+                        .map(|rvm| (fwm, MatchResult {
+                            start: rvm.start + fwm.end,
+                            end: rvm.end + fwm.end,
+                            score: rvm.score,
+                        }))
+                }
+            } else {
+                None
+            };
+
+            match pair {
+                Some((fwm, rvm)) => {
+                    self.result[base] = 1.0;
+                    self.result[base + 1] = fwm.start as f64;
+                    self.result[base + 2] = fwm.end as f64;
+                    self.result[base + 3] = rvm.start as f64;
+                    self.result[base + 4] = rvm.end as f64;
+                }
+                None => {
+                    self.result[base] = 0.0;
+                    self.result[base + 1] = -1.0;
+                    self.result[base + 2] = -1.0;
+                    self.result[base + 3] = -1.0;
+                    self.result[base + 4] = -1.0;
+                }
+            }
+        }
+    }
+}
+
+// --- cDNA-DISPLAY: existing substring search (unchanged) -----------------
 
 // Naive multi-byte substring search. Anchors are ~10 bp, reads ~150 bp, so
 // the naive O(n*m) cost is ~1500 byte ops per call — well under what a

@@ -5,5 +5,5 @@ import { __wbg_set_wasm } from "./cdna_core_wasm_bg.js";
 __wbg_set_wasm(wasm);
 wasm.__wbindgen_start();
 export {
-    Scorer, meanPhred, reverseComplement
+    DualAnchorScorer, Scorer, bandedAlign, meanPhred, reverseComplement
 } from "./cdna_core_wasm_bg.js";

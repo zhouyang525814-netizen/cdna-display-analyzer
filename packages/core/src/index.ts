@@ -54,3 +54,37 @@ export {
   type PipelineProgress,
   type PipelineResult,
 } from "./pipeline.js";
+
+export { bandedAlign, bandedAlignAscii, type BandedAlignResult } from "./banded-align.js";
+
+export {
+  NanoporeEngine,
+  DEFAULT_SETTINGS as NANOPORE_DEFAULT_SETTINGS,
+  createTsScorer,
+  resolveWtRois,
+  type NanoporeSiteConfig,
+  type NanoporeRoundConfig,
+  type NanoporeSettings,
+  type NanoporeSiteStats,
+  type NanoporeRoundStats,
+  type NanoporeGlobalBreakdown,
+  type NanoporeOutcome,
+  type SiteScorerLike,
+  type DualAnchorSiteOutput,
+} from "./nanopore.js";
+
+export {
+  runNanoporePipeline,
+  type NanoporePipelineRequest,
+  type NanoporePipelineProgress,
+  type NanoporePipelineResult,
+  type NanoporeSiteInput,
+  type NanoporeRoundInput,
+} from "./nanopore-pipeline.js";
+
+export {
+  runNanoporeAnalyzer,
+  type NanoporeAnalyzerInput,
+  type NanoporeAnalyzerOutput,
+  type NanoporeAnalyzerRow,
+} from "./nanopore-analyzer.js";

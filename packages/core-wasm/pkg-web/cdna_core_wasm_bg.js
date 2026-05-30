@@ -1,3 +1,74 @@
+/**
+ * Per-site dual-anchor scorer. Each call to `score(seq)` writes 5 fields
+ * per configured site into the internal result buffer:
+ *
+ *   [base + 0] = found ? 1 : 0   (both anchors located)
+ *   [base + 1] = fw_start        (-1 if not found)
+ *   [base + 2] = fw_end
+ *   [base + 3] = rv_start
+ *   [base + 4] = rv_end
+ *
+ * where `base = 5 * site_index`. The downstream anchor is searched only
+ * from `fw_end` onward, so it is guaranteed to sit after the upstream anchor.
+ */
+export class DualAnchorScorer {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        DualAnchorScorerFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_dualanchorscorer_free(ptr, 0);
+    }
+    /**
+     * Register one site. Order matters — site index is the row index in the
+     * per-call result buffer. Returns the new site index.
+     * @param {Uint8Array} fw_anchor
+     * @param {Uint8Array} rv_anchor
+     * @returns {number}
+     */
+    addSite(fw_anchor, rv_anchor) {
+        const ptr0 = passArray8ToWasm0(fw_anchor, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(rv_anchor, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.dualanchorscorer_addSite(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} max_subs
+     * @param {number} max_indels
+     */
+    constructor(max_subs, max_indels) {
+        const ret = wasm.dualanchorscorer_new(max_subs, max_indels);
+        this.__wbg_ptr = ret;
+        DualAnchorScorerFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * Returns a Float64Array view onto the internal result buffer. Length is
+     * `5 * site_count`. See struct doc for layout.
+     * @returns {Float64Array}
+     */
+    resultView() {
+        const ret = wasm.dualanchorscorer_resultView(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Score one read against every configured site. Writes results in-place
+     * into the buffer aliased by `resultView()`.
+     * @param {Uint8Array} seq
+     */
+    score(seq) {
+        const ptr0 = passArray8ToWasm0(seq, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.dualanchorscorer_score(this.__wbg_ptr, ptr0, len0);
+    }
+}
+if (Symbol.dispose) DualAnchorScorer.prototype[Symbol.dispose] = DualAnchorScorer.prototype.free;
+
 export class Scorer {
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
@@ -64,6 +135,27 @@ export class Scorer {
 if (Symbol.dispose) Scorer.prototype[Symbol.dispose] = Scorer.prototype.free;
 
 /**
+ * Exported flat-API wrapper for the TS test suite to verify Rust↔TS parity.
+ * Returns a 4-element Float64Array: [found ? 1 : 0, start, end, score].
+ * found==0 sets start/end/score to -1.
+ * @param {Uint8Array} haystack
+ * @param {Uint8Array} needle
+ * @param {number} max_subs
+ * @param {number} max_indels
+ * @returns {Float64Array}
+ */
+export function bandedAlign(haystack, needle, max_subs, max_indels) {
+    const ptr0 = passArray8ToWasm0(haystack, wasm.__wbindgen_malloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passArray8ToWasm0(needle, wasm.__wbindgen_malloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.bandedAlign(ptr0, len0, ptr1, len1, max_subs, max_indels);
+    var v3 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+    return v3;
+}
+
+/**
  * @param {Uint8Array} qual
  * @returns {number}
  */
@@ -103,6 +195,9 @@ export function __wbindgen_init_externref_table() {
     table.set(offset + 2, true);
     table.set(offset + 3, false);
 }
+const DualAnchorScorerFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_dualanchorscorer_free(ptr, 1));
 const ScorerFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_scorer_free(ptr, 1));

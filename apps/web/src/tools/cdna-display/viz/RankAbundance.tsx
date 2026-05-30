@@ -25,8 +25,11 @@ import {
 } from "recharts";
 import { ChartPanel } from "./ChartPanel";
 
+// First slot follows the active tool's primary accent (teal for cDNA, indigo
+// for Nanopore) so Round_0's line matches the rest of the UI. Slots 1+ are
+// categorical round-discriminators and stay constant across tools.
 const PALETTE = [
-  "hsl(188 78% 41%)", // teal-600 — primary
+  "hsl(var(--primary))",
   "hsl(280 65% 55%)", // purple
   "hsl(35 92% 50%)", // orange
   "hsl(140 60% 45%)", // green
@@ -236,7 +239,7 @@ export function RankAbundance({ countsByRound, totalsByRound, roundNames }: Prop
                 key={round}
                 type="monotone"
                 dataKey={round}
-                stroke={PALETTE[i % PALETTE.length] ?? "hsl(188 78% 41%)"}
+                stroke={PALETTE[i % PALETTE.length] ?? "hsl(var(--primary))"}
                 strokeWidth={1.6}
                 dot={false}
                 isAnimationActive={false}

@@ -1,0 +1,273 @@
+// End-to-end Nanopore SSM pipeline orchestrator. Streams each source as bytes
+// → FASTQ records, runs each read through the NanoporeEngine with RC retry on
+// no-site-extracted, and produces the per-site + haplotype counters that the
+// analyzer (Phase 6.4) will consume to emit CSVs.
+//
+// Modes:
+//   - multiplexed: every source feeds all rounds; engine binds each read to a
+//     round via barcode match on the 5' head.
+//   - per-round: `sourceRoundIndices` binds source[i] → round[k]. No barcode
+//     matching needed.
+//
+// Iso-morphic: no DOM, no Drive. Node-side tests and the browser Worker both
+// invoke this function the same way (same shape as runPipeline for cDNA).
+
+import type { IFastqSource } from "@cdna/types";
+import {
+  copyInto,
+  rcInto,
+  reverseInto,
+  uppercaseInto,
+} from "./demultiplex.js";
+import { readFastqRecords } from "./fastq.js";
+import {
+  DEFAULT_SETTINGS,
+  NanoporeEngine,
+  resolveWtRois,
+  type NanoporeGlobalBreakdown,
+  type NanoporeRoundStats,
+  type NanoporeSettings,
+  type NanoporeSiteConfig,
+  type SiteScorerLike,
+} from "./nanopore.js";
+import { runNanoporeAnalyzer, type NanoporeAnalyzerOutput } from "./nanopore-analyzer.js";
+import { createDualAnchorScorer } from "./wasm.js";
+
+const ENC = new TextEncoder();
+
+/** User-facing site input — anchors as plain ACGT strings. The orchestrator
+ *  encodes them and resolves the WT ROI from the reference. */
+export interface NanoporeSiteInput {
+  name: string;
+  fwAnchor: string;
+  rvAnchor: string;
+}
+
+export interface NanoporeRoundInput {
+  name: string;
+  /** Multiplexed mode only. Per-round mode: omit. */
+  barcode?: string;
+}
+
+export interface NanoporePipelineRequest {
+  sources: ReadonlyArray<IFastqSource>;
+  /** Reference amplicon spanning every site (used to derive WT ROI per site). */
+  reference: string;
+  sites: ReadonlyArray<NanoporeSiteInput>;
+  rounds: ReadonlyArray<NanoporeRoundInput>;
+  settings?: Partial<NanoporeSettings>;
+  /** Per-round binding for "per-round" mode. Length === sources.length. */
+  sourceRoundIndices?: ReadonlyArray<number>;
+  /** Opt into the WASM DualAnchorScorer. Falls back to the pure-TS scorer
+   *  when false / omitted. Both paths are byte-identical (parity-tested). */
+  useWasm?: boolean;
+  onProgress?: (event: NanoporePipelineProgress) => void;
+  signal?: AbortSignal;
+}
+
+export interface NanoporePipelineProgress {
+  sourceIndex: number;
+  bytesProcessed: number;
+  totalBytes: number | null;
+  recordsProcessed: number;
+}
+
+export interface NanoporePipelineResult {
+  /** Round name → site → roi_dna → count. */
+  dnaCounters: Map<string, Map<string, Map<string, number>>>;
+  /** Round name → joined_dna → count. Empty when haplotype output is disabled. */
+  haplotypeCounters: Map<string, Map<string, number>>;
+  /** Per-round stats including per-site sub-counters. */
+  stats: Map<string, NanoporeRoundStats>;
+  globalBreakdown: NanoporeGlobalBreakdown;
+  /** Resolved per-site config (anchors, expected ROI length, WT DNA). */
+  resolvedSites: NanoporeSiteConfig[];
+  /** Round-name list in input order — analyzer iterates this for CSV column order. */
+  roundNames: string[];
+  /** Site-name list in input order. */
+  siteNames: string[];
+  /** Analyzer output: per-site rows + (when ≥2 sites + reportHaplotype) haplotype
+   *  rows, plus their CSV strings. Computed once at the end of the pipeline so
+   *  the worker→main thread payload includes the final tables. */
+  analyzer: NanoporeAnalyzerOutput;
+}
+
+/** Stream-byte-callback wrapper: yields Uint8Array chunks and calls `onChunk`
+ *  with each chunk's byte length so the orchestrator can update progress. */
+async function* streamToAsyncIter(
+  stream: ReadableStream<Uint8Array>,
+  signal: AbortSignal | undefined,
+  onChunk: (n: number) => void,
+): AsyncIterable<Uint8Array> {
+  const reader = stream.getReader();
+  try {
+    while (true) {
+      if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+      const { done, value } = await reader.read();
+      if (done) return;
+      if (value) {
+        onChunk(value.byteLength);
+        yield value;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export async function runNanoporePipeline(
+  req: NanoporePipelineRequest,
+): Promise<NanoporePipelineResult> {
+  const settings: NanoporeSettings = { ...DEFAULT_SETTINGS, ...(req.settings ?? {}) };
+
+  // Resolve WT ROI per site from the reference.
+  const { wtByName, expectedRoiLen } = resolveWtRois(req.reference, req.sites);
+
+  const resolvedSites: NanoporeSiteConfig[] = req.sites.map((s) => ({
+    name: s.name,
+    fwAnchor: ENC.encode(s.fwAnchor.toUpperCase()),
+    rvAnchor: ENC.encode(s.rvAnchor.toUpperCase()),
+    expectedRoiLen: expectedRoiLen.get(s.name)!,
+    wtDna: wtByName.get(s.name)!,
+  }));
+
+  const rounds = req.rounds.map((r) =>
+    r.barcode
+      ? { name: r.name, barcode: ENC.encode(r.barcode.toUpperCase()) }
+      : { name: r.name },
+  );
+
+  // Construct scorer — WASM if requested, TS fallback otherwise. The engine
+  // builds its own TS scorer when none is supplied; only override when WASM.
+  let scorer: SiteScorerLike | undefined;
+  if (req.useWasm) {
+    scorer = createDualAnchorScorer(
+      resolvedSites.map((s) => ({ fwAnchor: s.fwAnchor, rvAnchor: s.rvAnchor })),
+      settings.maxAnchorSubs,
+      settings.maxAnchorIndels,
+    );
+  }
+
+  const engine = new NanoporeEngine(resolvedSites, rounds, settings, scorer);
+
+  try {
+    for (let srcIdx = 0; srcIdx < req.sources.length; srcIdx++) {
+      const source = req.sources[srcIdx]!;
+      const desc = source.describe();
+      const stream = await source.open(req.signal);
+
+      let bytesProcessed = 0;
+      let recordsProcessed = 0;
+      let lastReportedBytes = 0;
+      let upScratch = new Uint8Array(256);
+      let upQualScratch = new Uint8Array(256);
+      let rcScratch = new Uint8Array(256);
+      let rcQualScratch = new Uint8Array(256);
+
+      req.onProgress?.({
+        sourceIndex: srcIdx,
+        bytesProcessed: 0,
+        totalBytes: desc.sizeBytes,
+        recordsProcessed: 0,
+      });
+
+      const bytesIter = streamToAsyncIter(stream, req.signal, (n) => {
+        bytesProcessed += n;
+        if (req.onProgress && bytesProcessed - lastReportedBytes >= 1024 * 1024) {
+          lastReportedBytes = bytesProcessed;
+          req.onProgress({
+            sourceIndex: srcIdx,
+            bytesProcessed,
+            totalBytes: desc.sizeBytes,
+            recordsProcessed,
+          });
+        }
+      });
+
+      const boundRoundIdx =
+        req.sourceRoundIndices && req.sourceRoundIndices.length === req.sources.length
+          ? req.sourceRoundIndices[srcIdx] ?? -1
+          : -1;
+
+      try {
+        for await (const rec of readFastqRecords(bytesIter)) {
+          if (req.signal?.aborted) throw req.signal.reason ?? new Error("aborted");
+
+          if (rec.seq.length > upScratch.length) {
+            upScratch = new Uint8Array(rec.seq.length);
+            upQualScratch = new Uint8Array(rec.seq.length);
+            rcScratch = new Uint8Array(rec.seq.length);
+            rcQualScratch = new Uint8Array(rec.seq.length);
+          }
+
+          const upSeq = uppercaseInto(rec.seq, upScratch);
+          const upQual = rec.qual.length === rec.seq.length
+            ? copyInto(rec.qual, upQualScratch)
+            : rec.qual;
+
+          let outcome =
+            boundRoundIdx >= 0
+              ? engine.processReadForRound(upSeq, upQual, boundRoundIdx)
+              : engine.processRead(upSeq, upQual);
+          if (outcome !== "assigned" && outcome !== "low_quality_read") {
+            // Low quality is final — RC won't fix bad chemistry. Anything
+            // else (no_anchor / barcode_mismatch) might just be antisense.
+            const rcBytes = rcInto(upSeq, rcScratch);
+            const rcQual = reverseInto(upQual, rcQualScratch);
+            outcome =
+              boundRoundIdx >= 0
+                ? engine.processReadForRound(rcBytes, rcQual, boundRoundIdx)
+                : engine.processRead(rcBytes, rcQual);
+          }
+
+          recordsProcessed++;
+          if (req.onProgress && (recordsProcessed & 0xfff) === 0) {
+            lastReportedBytes = bytesProcessed;
+            req.onProgress({
+              sourceIndex: srcIdx,
+              bytesProcessed,
+              totalBytes: desc.sizeBytes,
+              recordsProcessed,
+            });
+          }
+        }
+      } finally {
+        req.onProgress?.({
+          sourceIndex: srcIdx,
+          bytesProcessed,
+          totalBytes: desc.sizeBytes,
+          recordsProcessed,
+        });
+      }
+    }
+  } finally {
+    // Free the WASM scorer if we constructed one.
+    const maybeFree = (scorer as unknown as { free?: () => void } | undefined)?.free;
+    if (typeof maybeFree === "function") {
+      maybeFree.call(scorer);
+    }
+  }
+
+  const roundNames = rounds.map((r) => r.name);
+  const siteNames = resolvedSites.map((s) => s.name);
+  const analyzer = runNanoporeAnalyzer({
+    roundNames,
+    siteNames,
+    dnaCounters: engine.dnaCounters,
+    haplotypeCounters: engine.haplotypeCounters,
+    stats: engine.stats,
+    sites: resolvedSites.map((s) => ({ name: s.name, wtDna: s.wtDna })),
+    emitHaplotype: settings.reportHaplotype,
+  });
+
+  return {
+    dnaCounters: engine.dnaCounters,
+    haplotypeCounters: engine.haplotypeCounters,
+    stats: engine.stats,
+    globalBreakdown: engine.globalBreakdown,
+    resolvedSites,
+    roundNames,
+    siteNames,
+    analyzer,
+  };
+}

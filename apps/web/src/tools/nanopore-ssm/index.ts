@@ -1,34 +1,33 @@
-// Nanopore site-saturation-mutagenesis tool — placeholder.
-//
-// This is intentionally a stub today: the tool slot is reserved in the
-// registry + header switcher so the architecture is verified end-to-end,
-// but the actual fuzzy-anchor engine + Nanopore-specific QC are deferred
-// until the QC design is locked down (Nanopore error rates differ per
-// chemistry and per basecaller version — the right QC thresholds need
-// real data + calibration).
-//
-// When the engine lands, this file will look like cdna-display/index.ts:
-//   - import each step component from ./steps/
-//   - wire them in the canonical order
-//   - bind the per-tool store hook in useCurrentStep / useSetStep
+// Tool registration for the Nanopore-SSM pipeline. Mirrors the cDNA tool's
+// 5-step wizard layout; step components are UI mockups until the engine lands
+// (Phase 6.2+). Theme override lives in index.css under the data-tool selector.
 
 import { Microscope } from "lucide-react";
 import type { Tool } from "@/tools/types";
-import { ComingSoonStep } from "./steps/ComingSoonStep";
+import { useNanoporeStore } from "@/state/useNanoporeStore";
+import { SourcesStep } from "./steps/SourcesStep";
+import { ConfigureStep } from "./steps/ConfigureStep";
+import { PreviewStep } from "./steps/PreviewStep";
+import { RunStep } from "./steps/RunStep";
+import { ResultsStep } from "./steps/ResultsStep";
 
 export const nanoporeSsmTool: Tool = {
   id: "nanopore-ssm",
   name: "Nanopore SSM Analyzer",
   shortName: "Nanopore",
   description:
-    "Browser-native site-saturation-mutagenesis variant counting from Nanopore reads (coming soon).",
+    "Variant counting + WT-anchored enrichment for 1–2 site SSM libraries sequenced on Oxford Nanopore.",
   icon: Microscope,
   steps: [
-    {
-      id: "coming-soon",
-      label: "Coming soon",
-      blurb: "In development",
-      Component: ComingSoonStep,
-    },
+    { id: "sources", label: "Sources", blurb: "FASTQs + mode", Component: SourcesStep },
+    { id: "configure", label: "Configure", blurb: "Reference + anchors", Component: ConfigureStep },
+    { id: "preview", label: "Preview", blurb: "Anchor alignment", Component: PreviewStep },
+    { id: "run", label: "Run", blurb: "Extract + count", Component: RunStep },
+    { id: "results", label: "Results", blurb: "Fitness vs WT", Component: ResultsStep },
   ],
+  useCurrentStep: () => useNanoporeStore((s) => s.currentStep),
+  // The Tool API takes step ids as plain strings; the store narrows to the
+  // NanoporeStepId union. Cast at the boundary — invalid ids are filtered out
+  // upstream by the Stepper before this is called.
+  useSetStep: () => useNanoporeStore((s) => s.setStep as (stepId: string) => void),
 };

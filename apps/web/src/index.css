@@ -47,6 +47,18 @@
     --radius: 0.5rem;
   }
 
+  /* Nanopore SSM tool theme — indigo accent so users can tell at a glance
+   * which mode they're in. Layout is identical; only the accent + ring +
+   * subtle neutrals shift. Semantic colors (success/warning/destructive)
+   * stay shared so a yellow-bordered warning means the same thing in both
+   * tools. App.tsx mirrors the active tool id onto <html data-tool="...">. */
+  :root[data-tool="nanopore-ssm"] {
+    --primary: 243 75% 59%;
+    --ring: 243 75% 59%;
+    --secondary: 243 35% 97%;
+    --accent: 243 35% 97%;
+  }
+
   * {
     @apply border-border;
   }

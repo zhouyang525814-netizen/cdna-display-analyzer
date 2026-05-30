@@ -7,11 +7,24 @@
 // reads never have to cross the boundary.
 
 import * as Comlink from "comlink";
-import { runPipeline, type PipelineProgress } from "@cdna/core";
+import {
+  runPipeline,
+  runNanoporePipeline,
+  type NanoporePipelineProgress,
+  type PipelineProgress,
+} from "@cdna/core";
 import type { IAuthProvider, IFastqSource } from "@cdna/types";
 import { LocalFastqSource } from "../adapters/LocalFastqSource";
 import { DriveFastqSource } from "../adapters/DriveFastqSource";
-import type { PipelineJob, PipelineProgressMsg, PipelineOutcome } from "./types";
+import type {
+  NanoporeJob,
+  NanoporeOutcome,
+  PipelineJob,
+  PipelineProgressMsg,
+  PipelineOutcome,
+} from "./types";
+
+const PREVIEW_ROWS = 200;
 
 // Worker-side console.log appears in DevTools under its own thread context;
 // every `[worker]` line below shows up when DevTools → Console → "all
@@ -155,6 +168,123 @@ const api = {
     } catch (e: unknown) {
       const err = e as Error;
       const msg = `worker run() threw: ${err.name}: ${err.message}\n${err.stack ?? "(no stack)"}`;
+      console.error(`[worker] ${msg}`);
+      throw e;
+    }
+  },
+
+  /**
+   * Nanopore SSM run. Same boundary semantics as `run` (Comlink-proxied
+   * progress, structured-clone payloads, Blob-wrapped CSVs) but routes to
+   * `runNanoporePipeline` with per-site + haplotype output.
+   */
+  async runNanopore(
+    job: NanoporeJob,
+    onProgress?: (msg: PipelineProgressMsg) => void,
+  ): Promise<NanoporeOutcome> {
+    const log = (m: string, extra?: unknown) => wlog(m, extra);
+
+    try {
+      log("runNanopore() entered", {
+        localFiles: job.localFiles.length,
+        driveFiles: job.driveFiles.length,
+        sites: job.sites.length,
+        rounds: job.rounds.length,
+        mode: job.mode ?? "multiplexed",
+        useWasm: job.useWasm,
+      });
+
+      if (job.driveFiles.length > 0 && !job.driveToken) {
+        throw new Error("Drive files specified but no OAuth token attached to the job.");
+      }
+      const auth = job.driveToken ? staticAuth(job.driveToken) : null;
+
+      const sources: IFastqSource[] = [
+        ...job.localFiles.map((f) => new LocalFastqSource(f)),
+        ...job.driveFiles.map((d) =>
+          new DriveFastqSource({ id: d.id, name: d.name, sizeBytes: d.sizeBytes }, auth!),
+        ),
+      ];
+      const sourceNames = [
+        ...job.localFiles.map((f) => f.name),
+        ...job.driveFiles.map((d) => d.name),
+      ];
+      log(`constructed ${sources.length} sources`, sourceNames);
+
+      let lastReportedSrc = -1;
+      const wrappedProgress = (p: NanoporePipelineProgress) => {
+        if (p.sourceIndex !== lastReportedSrc) {
+          lastReportedSrc = p.sourceIndex;
+          log(
+            `[nanopore] source[${p.sourceIndex}] = ${sourceNames[p.sourceIndex]} — first progress event`,
+          );
+        }
+        onProgress?.({
+          sourceIndex: p.sourceIndex,
+          fileName: sourceNames[p.sourceIndex] ?? "",
+          bytesProcessed: p.bytesProcessed,
+          totalBytes: p.totalBytes,
+          recordsProcessed: p.recordsProcessed,
+        });
+      };
+
+      log("calling runNanoporePipeline …");
+      const result = await runNanoporePipeline({
+        sources,
+        reference: job.reference,
+        sites: job.sites,
+        rounds: job.rounds,
+        ...(job.settings ? { settings: job.settings } : {}),
+        useWasm: job.useWasm,
+        onProgress: wrappedProgress,
+        ...(job.mode === "per-round" && job.sourceRoundIndices
+          ? { sourceRoundIndices: job.sourceRoundIndices }
+          : {}),
+      });
+      log("runNanoporePipeline returned", {
+        sites: result.siteNames.length,
+        roundsWithStats: Array.from(result.stats.keys()),
+        perSiteRows: result.analyzer.perSiteRows.length,
+        haplotypeRows: result.analyzer.haplotypeRows.length,
+      });
+
+      // Flatten Map<round, NanoporeRoundStats> → Record. Each value already
+      // has `sites: Record<string, NanoporeSiteStats>` so the nested shape
+      // is already structurally cloneable.
+      const statsByRound: Record<string, ReturnType<typeof result.stats.get> & {}> = {};
+      for (const [name, stat] of result.stats) {
+        statsByRound[name] = stat;
+      }
+
+      // Site → WT DNA map, used by the UI to badge WT rows.
+      const resolvedWtBySite: Record<string, string> = {};
+      const expectedRoiLenBySite: Record<string, number> = {};
+      for (const s of result.resolvedSites) {
+        resolvedWtBySite[s.name] = s.wtDna;
+        expectedRoiLenBySite[s.name] = s.expectedRoiLen;
+      }
+
+      const perSiteCsv = result.analyzer.perSiteCsv;
+      const haplotypeCsv = result.analyzer.haplotypeCsv;
+      const perSiteCsvBlob = perSiteCsv ? new Blob([perSiteCsv], { type: "text/csv" }) : null;
+      const haplotypeCsvBlob = haplotypeCsv ? new Blob([haplotypeCsv], { type: "text/csv" }) : null;
+      log(`csv lengths: per-site=${perSiteCsv?.length ?? 0}, haplotype=${haplotypeCsv?.length ?? 0}`);
+
+      return {
+        perSiteCsvBlob,
+        haplotypeCsvBlob,
+        perSiteRowsPreview: result.analyzer.perSiteRows.slice(0, PREVIEW_ROWS),
+        haplotypeRowsPreview: result.analyzer.haplotypeRows.slice(0, PREVIEW_ROWS),
+        statsByRound,
+        globalBreakdown: result.globalBreakdown,
+        roundNames: result.roundNames,
+        siteNames: result.siteNames,
+        resolvedWtBySite,
+        expectedRoiLenBySite,
+      };
+    } catch (e: unknown) {
+      const err = e as Error;
+      const msg = `worker runNanopore() threw: ${err.name}: ${err.message}\n${err.stack ?? "(no stack)"}`;
       console.error(`[worker] ${msg}`);
       throw e;
     }

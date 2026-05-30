@@ -5,7 +5,16 @@
 //     before crossing so the main thread doesn't need to know about the
 //     worker-side internal shapes.
 
-import type { RoundConfigInput, DemultiplexSettings, RoundStats, UnassignedBreakdown } from "@cdna/core";
+import type {
+  RoundConfigInput,
+  DemultiplexSettings,
+  RoundStats,
+  UnassignedBreakdown,
+  NanoporeAnalyzerRow,
+  NanoporeGlobalBreakdown,
+  NanoporeRoundStats,
+  NanoporeSettings,
+} from "@cdna/core";
 
 export interface DriveFileRef {
   id: string;
@@ -53,4 +62,66 @@ export interface PipelineOutcome {
   unassignedBreakdown: UnassignedBreakdown;
   statsByRound: Record<string, RoundStats>;
   roundNames: string[];
+}
+
+// --- Nanopore SSM tool ---------------------------------------------------
+
+/** Wire-shape of a Nanopore site config. Anchors as plain ASCII strings so
+ *  the worker can encode them once it owns them. */
+export interface NanoporeSiteWire {
+  name: string;
+  fwAnchor: string;
+  rvAnchor: string;
+}
+
+/** Wire-shape of one round. Multiplexed mode includes a barcode prefix;
+ *  per-round mode omits it (source binding does the discrimination). */
+export interface NanoporeRoundWire {
+  name: string;
+  barcode?: string;
+}
+
+export interface NanoporeJob {
+  localFiles: File[];
+  driveFiles: DriveFileRef[];
+  /** OAuth bearer for Drive fetches. Required iff driveFiles is non-empty. */
+  driveToken?: string;
+  /** WT amplicon DNA spanning all sites — the engine uses regions matching
+   *  this exactly as the WT baseline + computes WT ROI per site from it. */
+  reference: string;
+  sites: NanoporeSiteWire[];
+  rounds: NanoporeRoundWire[];
+  /** Partial override of NANOPORE_DEFAULT_SETTINGS. Anything omitted keeps
+   *  the defaults: read Q≥10, ROI Q≥15, maxSubs=2, maxIndels=1, etc. */
+  settings?: Partial<NanoporeSettings>;
+  mode?: "multiplexed" | "per-round";
+  /** In per-round mode, parallel array to localFiles ++ driveFiles giving
+   *  the round index each source is bound to. */
+  sourceRoundIndices?: number[];
+  useWasm: boolean;
+}
+
+/** Serialisable Nanopore outcome. Like the cDNA outcome, large strings
+ *  (the CSVs) are wrapped in Blobs so postMessage doesn't deep-copy
+ *  potentially-MB payloads. Maps from the engine are flattened to records. */
+export interface NanoporeOutcome {
+  /** enrichment_per_site.csv as a Blob. */
+  perSiteCsvBlob: Blob | null;
+  /** enrichment_haplotype.csv as a Blob (null when no haplotype data). */
+  haplotypeCsvBlob: Blob | null;
+  /** First 200 per-site rows for instant top-N display without re-parsing
+   *  the CSV. Same shape as core's NanoporeAnalyzerRow. */
+  perSiteRowsPreview: NanoporeAnalyzerRow[];
+  /** First 200 haplotype rows. Empty when haplotype output is disabled. */
+  haplotypeRowsPreview: NanoporeAnalyzerRow[];
+  /** Per-round stats including per-site sub-counters + haplotype_passed_qc. */
+  statsByRound: Record<string, NanoporeRoundStats>;
+  globalBreakdown: NanoporeGlobalBreakdown;
+  roundNames: string[];
+  siteNames: string[];
+  /** Site name → resolved WT DNA (the inter-anchor reference slice). Used
+   *  by the UI to badge the WT row in variant tables. */
+  resolvedWtBySite: Record<string, string>;
+  /** Site name → expected ROI length. Used by the UI for verification text. */
+  expectedRoiLenBySite: Record<string, number>;
 }

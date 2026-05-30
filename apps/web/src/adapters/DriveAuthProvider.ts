@@ -27,6 +27,22 @@ interface TokenCache {
 const TOKEN_KEY = "cdna_drive_token";
 const PENDING_KEY = "cdna_drive_pending_action";
 
+/** Cheap "do we have a live Drive token?" check that doesn't construct a
+ *  DriveAuthProvider. Used by Picker UIs to decide whether the "Pick from
+ *  Drive…" button is enabled without firing OAuth. Mirrors the cache key
+ *  layout the DriveAuthProvider instance uses, so the two stay in sync. */
+export function isDriveSignedIn(): boolean {
+  if (typeof sessionStorage === "undefined") return false;
+  const raw = sessionStorage.getItem(TOKEN_KEY);
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw) as { token?: string; expiresAt?: number };
+    return !!parsed.token && (parsed.expiresAt ?? 0) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
 /** Marker the caller writes before triggering a redirect; we read it after the
  *  return navigation to decide what to auto-resume (e.g. open the Picker). */
 export type PendingAction = "open_picker" | null;

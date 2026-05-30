@@ -61,3 +61,80 @@ export function wasmReverseComplement(input: Uint8Array): Uint8Array {
 export function wasmMeanPhred(qual: Uint8Array): number {
   return wasm.meanPhred(qual);
 }
+
+// --- Nanopore SSM: dual-anchor scorer ------------------------------------
+
+/** Per-site dual-anchor extraction result, mirroring banded-align.ts shape
+ *  but with both anchor positions. -1 fields indicate "not found". */
+export interface DualAnchorSiteResult {
+  found: boolean;
+  fwStart: number;
+  fwEnd: number;
+  rvStart: number;
+  rvEnd: number;
+}
+
+export interface DualAnchorScorerLike {
+  /** Run the matcher on one read; returns per-site results in registration order. */
+  score(seq: Uint8Array): DualAnchorSiteResult[];
+  free?(): void;
+}
+
+export interface DualAnchorSiteConfig {
+  fwAnchor: Uint8Array;
+  rvAnchor: Uint8Array;
+}
+
+/** Construct a DualAnchorScorer with the given sites and edit budget.
+ *  `maxSubs + maxIndels` is the total per-anchor edit budget; `maxIndels`
+ *  separately caps the alignment-length band width. */
+export function createDualAnchorScorer(
+  sites: ReadonlyArray<DualAnchorSiteConfig>,
+  maxSubs: number,
+  maxIndels: number,
+): DualAnchorScorerLike {
+  const scorer = new wasm.DualAnchorScorer(maxSubs, maxIndels);
+  for (const s of sites) {
+    scorer.addSite(s.fwAnchor, s.rvAnchor);
+  }
+  let view: Float64Array = scorer.resultView();
+  return {
+    score(seq: Uint8Array): DualAnchorSiteResult[] {
+      scorer.score(seq);
+      if (view.byteLength === 0) view = scorer.resultView();
+      const out: DualAnchorSiteResult[] = [];
+      for (let i = 0; i < sites.length; i++) {
+        const base = 5 * i;
+        out.push({
+          found: view[base] === 1.0,
+          fwStart: view[base + 1]!,
+          fwEnd: view[base + 2]!,
+          rvStart: view[base + 3]!,
+          rvEnd: view[base + 4]!,
+        });
+      }
+      return out;
+    },
+    free() {
+      scorer.free();
+    },
+  };
+}
+
+/** One-shot WASM bandedAlign. Used by the parity test and by callers that
+ *  don't want to build a Scorer for a single lookup. Matches the TS
+ *  bandedAlign return shape. */
+export function wasmBandedAlign(
+  haystack: Uint8Array,
+  needle: Uint8Array,
+  maxSubs: number,
+  maxIndels: number,
+): { found: boolean; start: number; end: number; score: number } {
+  const r = wasm.bandedAlign(haystack, needle, maxSubs, maxIndels);
+  return {
+    found: r[0] === 1.0,
+    start: r[1]!,
+    end: r[2]!,
+    score: r[3]!,
+  };
+}

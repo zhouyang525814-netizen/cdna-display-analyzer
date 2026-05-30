@@ -4,7 +4,13 @@
 
 import * as Comlink from "comlink";
 import type { PipelineWorkerApi } from "./pipeline.worker";
-import type { PipelineJob, PipelineOutcome, PipelineProgressMsg } from "./types";
+import type {
+  NanoporeJob,
+  NanoporeOutcome,
+  PipelineJob,
+  PipelineOutcome,
+  PipelineProgressMsg,
+} from "./types";
 
 let workerInstance: Worker | null = null;
 let api: Comlink.Remote<PipelineWorkerApi> | null = null;
@@ -82,6 +88,29 @@ export async function runInWorker(
     return result;
   } catch (err) {
     console.error("[main] worker.run() threw", err);
+    throw err;
+  }
+}
+
+/** Same as `runInWorker` but routes to the Nanopore SSM pipeline inside the
+ *  worker. Same persistent worker instance; same __ready handshake. */
+export async function runNanoporeInWorker(
+  job: NanoporeJob,
+  onProgress?: (msg: PipelineProgressMsg) => void,
+): Promise<NanoporeOutcome> {
+  const a = ensureWorker();
+
+  console.log("[main] (nanopore) waiting for worker __ready …");
+  await workerReady;
+  console.log("[main] (nanopore) worker is ready — sending runNanopore() call");
+
+  const progress = onProgress ? Comlink.proxy(onProgress) : undefined;
+  try {
+    const result = await a.runNanopore(job, progress);
+    console.log("[main] worker.runNanopore() returned");
+    return result;
+  } catch (err) {
+    console.error("[main] worker.runNanopore() threw", err);
     throw err;
   }
 }
