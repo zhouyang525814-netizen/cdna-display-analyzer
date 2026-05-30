@@ -9,6 +9,43 @@ Date format: `YYYY-MM-DD`.
 
 ---
 
+## 2026-05-30 — Phase 6.8 — Fix: Drive sign-in in per-round mode + Cancel button
+
+User-reported issues from the first browser test.
+
+### Drive picker on per-round Configure was unreachable
+
+- Symptom: in per-round mode, the "Pick from Drive…" button on each round's
+  picker was permanently disabled.
+- Root cause: the Sources step's MultiplexSources card (which carried the
+  Drive sign-in path) is hidden in per-round mode, so the user had no way
+  to authenticate. The Configure-side per-round picker requires a cached
+  token in sessionStorage; with no path to sign in, the token was never
+  cached, so `isDriveSignedIn()` stayed false and the button stayed disabled.
+- Fix: added a standalone **DriveSignInCard** to the Sources step that's
+  visible whenever Drive is configured AND pipeline mode is per-round.
+  Shows a "Connected" badge once signed in (refreshes every 1s so the
+  post-OAuth-return state flips automatically); offers a "Sign in to Google
+  Drive" button that triggers the OAuth redirect when not signed in; and a
+  Sign-out option when connected. With this card, the per-round Configure
+  Drive picker now works as expected.
+- File: [steps/SourcesStep.tsx](steps/SourcesStep.tsx).
+
+### Cancel button on the Run step
+
+- Mirrors the cDNA tool's pattern: `terminateWorker()` + status="cancelled"
+  + warning log entry. The catch arm of `handleStart` now checks the current
+  status before promoting Comlink's "worker terminated" rejection into an
+  error — cancellation stays surfaced as `cancelled`, not error.
+- The Start button now toggles to a destructive Cancel button while
+  `status === "running"`.
+- A new worker is spawned automatically on the next Start (the
+  workerClient lazily reinstantiates after `terminateWorker()`).
+- File: [steps/RunStep.tsx](steps/RunStep.tsx).
+
+Both changes are UI-only; no engine touches, no test regressions
+(124 passing, 2 skipped).
+
 ## 2026-05-30 — Phase 6.7 — 2-site fixture + smoke test + user configs
 
 The haplotype path now has end-to-end test coverage on a synthetic library

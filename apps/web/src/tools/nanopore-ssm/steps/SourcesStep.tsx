@@ -115,15 +115,18 @@ export function SourcesStep() {
           setDriveFiles={setDriveFiles}
         />
       ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">FASTQ sources</CardTitle>
-            <CardDescription>
-              In per-round mode, each round's FASTQ is picked on the Configure step
-              alongside its name. Nothing to do here.
-            </CardDescription>
-          </CardHeader>
-        </Card>
+        <>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">FASTQ sources</CardTitle>
+              <CardDescription>
+                In per-round mode, each round's FASTQ is picked on the Configure step
+                alongside its name. Nothing to do here for local files.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+          <DriveSignInCard />
+        </>
       )}
 
       <div className="flex justify-end">
@@ -390,4 +393,81 @@ function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
   return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+/** Standalone Drive sign-in card — visible in per-round mode so the user
+ *  can authenticate before going to Configure (where per-round Drive picks
+ *  happen). OAuth redirects to Google; on return, sessionStorage has the
+ *  token and the picker buttons on Configure unlock. */
+function DriveSignInCard() {
+  const [signedIn, setSignedIn] = useState(isDriveSignedIn());
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const driveConfigured = !!(CLIENT_ID && API_KEY);
+
+  // Refresh sign-in flag periodically so post-OAuth return flips the badge.
+  useEffect(() => {
+    const id = setInterval(() => setSignedIn(isDriveSignedIn()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!driveConfigured) return null;
+
+  const handleSignIn = async () => {
+    setErr(null);
+    try {
+      setBusy(true);
+      const auth = new DriveAuthProvider({ clientId: CLIENT_ID! });
+      // getToken() triggers an OAuth redirect when no valid token cached —
+      // the tab navigates away, then back. Anything typed elsewhere in the
+      // wizard is preserved by the store + sessionStorage; sign-in is meant
+      // to happen BEFORE filling in Configure for that reason.
+      await auth.getToken();
+      setSignedIn(true);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSignOut = async () => {
+    const auth = new DriveAuthProvider({ clientId: CLIENT_ID! });
+    await auth.signOut();
+    setSignedIn(false);
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Google Drive (optional)</CardTitle>
+        <CardDescription>
+          Sign in here once; the per-round "Pick from Drive…" buttons on the
+          Configure step will then work without further prompts.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge
+            variant="outline"
+            className={signedIn ? "border-success text-success" : "text-muted-foreground"}
+          >
+            <Cloud className="mr-1.5 h-3 w-3" />
+            {signedIn ? "Connected" : "Not signed in"}
+          </Badge>
+          {signedIn ? (
+            <Button size="sm" variant="outline" onClick={() => void handleSignOut()}>
+              Sign out
+            </Button>
+          ) : (
+            <Button size="sm" onClick={() => void handleSignIn()} disabled={busy}>
+              <Cloud className="mr-1.5 h-3.5 w-3.5" />
+              {busy ? "Redirecting…" : "Sign in to Google Drive"}
+            </Button>
+          )}
+          {err && <span className="text-xs text-destructive">{err}</span>}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }

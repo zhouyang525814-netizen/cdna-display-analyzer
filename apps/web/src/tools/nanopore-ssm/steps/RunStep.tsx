@@ -7,7 +7,7 @@
 // the run and the UI follows along.
 
 import { useCallback, useEffect, useMemo } from "react";
-import { ArrowLeft, Play } from "lucide-react";
+import { ArrowLeft, Play, Square } from "lucide-react";
 import {
   useNanoporeStore,
   type NanoporeLogEntry,
@@ -16,7 +16,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
-import { runNanoporeInWorker, setWorkerErrorHandler } from "@/worker/workerClient";
+import {
+  runNanoporeInWorker,
+  setWorkerErrorHandler,
+  terminateWorker,
+} from "@/worker/workerClient";
 import { DriveAuthProvider } from "@/adapters/DriveAuthProvider";
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
@@ -187,6 +191,11 @@ export function RunStep() {
       // Hop straight to Results so the user sees the numbers.
       setStep("results");
     } catch (e) {
+      // If the user already hit Cancel, the worker was terminated and the
+      // Comlink RPC threw "Worker has been terminated" or similar. Don't
+      // promote that to an "error" status — the cancelled state is what we
+      // want to surface in the UI.
+      if (useNanoporeStore.getState().status === "cancelled") return;
       const m = `Run failed: ${(e as Error).message}`;
       pushLog({ ts: Date.now(), tag: "error", msg: m });
       setErrorMessage(m);
@@ -195,6 +204,17 @@ export function RunStep() {
   };
 
   const running = status === "running";
+
+  const handleCancel = useCallback(() => {
+    terminateWorker();
+    setStatus("cancelled");
+    setTiming(useNanoporeStore.getState().startedAt, Date.now());
+    appendLog({
+      ts: Date.now(),
+      tag: "warning",
+      msg: "Cancelled by user — worker terminated.",
+    });
+  }, [setStatus, setTiming, appendLog]);
 
   return (
     <div className="space-y-6">
@@ -220,14 +240,21 @@ export function RunStep() {
               site{sites.length === 1 ? "" : "s"}
               {sites.length >= 2 && reportHaplotype ? " + haplotype" : ""}
             </div>
-            <Button
-              size="lg"
-              onClick={() => void handleStart()}
-              disabled={running || uiSources.length === 0}
-            >
-              <Play className="mr-2 h-4 w-4" />
-              {running ? "Running…" : "Start"}
-            </Button>
+            {running ? (
+              <Button size="lg" variant="destructive" onClick={handleCancel}>
+                <Square className="mr-2 h-4 w-4" />
+                Cancel
+              </Button>
+            ) : (
+              <Button
+                size="lg"
+                onClick={() => void handleStart()}
+                disabled={uiSources.length === 0}
+              >
+                <Play className="mr-2 h-4 w-4" />
+                Start
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>
