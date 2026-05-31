@@ -174,11 +174,11 @@ export function RunStep() {
           settings: {
             adaptive: s.adaptive,
             filterStop: s.filterStop,
-            minMeanPhred: 20.0,
-            // CDS-region Q check uses the same threshold by default; this is
-            // the B2 fix from the QC audit (catches reads with high overall
-            // quality but a noisy CDS region toward the 3' end).
-            minMeanPhredCds: 20.0,
+            // Read from the store; defaults are 20.0 (Illumina Q≥20 is the
+            // standard cutoff for high-confidence base calls). Users can lower
+            // them on the Configure → Advanced section for noisy datasets.
+            minMeanPhred: s.minMeanPhred,
+            minMeanPhredCds: s.minMeanPhredCds,
           },
           useWasm: s.useWasm,
           mode: s.pipelineMode,

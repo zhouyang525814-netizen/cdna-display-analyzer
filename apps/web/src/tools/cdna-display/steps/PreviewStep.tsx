@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { estimateReadLength, runPreview, type PreviewResult, type PreviewStatus } from "@/tools/cdna-display/preview";
+import { translateDna } from "@cdna/core";
 
 export function PreviewStep() {
   const {
@@ -205,8 +206,60 @@ function PreviewRoundCard({
             </div>
           </div>
         )}
+        {ok && cdsFrameOk && round.cdsStart != null && round.cdsEnd != null && (
+          <CdsAaPreview
+            visibleSeq={pr.visibleSeq}
+            cdsStart={round.cdsStart}
+            cdsEnd={round.cdsEnd}
+          />
+        )}
       </CardContent>
     </Card>
+  );
+}
+
+/** Show the DNA + translated AA for the selected CDS region. Helps the user
+ *  catch the off-by-one mistakes that are easy to make when typing CDS
+ *  Start/End in a 0-indexed mental model. */
+function CdsAaPreview({
+  visibleSeq,
+  cdsStart,
+  cdsEnd,
+}: {
+  visibleSeq: string;
+  cdsStart: number;
+  cdsEnd: number;
+}) {
+  if (cdsStart < 1 || cdsEnd > visibleSeq.length || cdsEnd < cdsStart) return null;
+  const dna = visibleSeq.slice(cdsStart - 1, cdsEnd);
+  if (dna.length === 0 || dna.length % 3 !== 0) return null;
+  const aa = translateDna(dna);
+  const hasStop = aa.includes("*");
+  return (
+    <div className="rounded-md border bg-background p-2.5">
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        CDS preview · {dna.length} bp / {aa.length} aa
+      </div>
+      <pre className="overflow-x-auto font-mono text-xs leading-relaxed">
+        <div className={hasStop ? "text-destructive" : "text-success"}>
+          {aa.split("").map((a, i) => (
+            <span key={i} className="inline-block">
+              {" "}
+              {a}{" "}
+            </span>
+          ))}
+        </div>
+        <div className="text-success-foreground">
+          <span className="rounded-sm bg-success px-px">{dna}</span>
+        </div>
+      </pre>
+      {hasStop && (
+        <div className="mt-1 text-[11px] text-destructive">
+          ⚠ Contains a stop codon — reads will be dropped unless "Discard CDS with premature stop"
+          is unchecked on Configure.
+        </div>
+      )}
+    </div>
   );
 }
 

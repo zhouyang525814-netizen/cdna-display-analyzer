@@ -11,8 +11,14 @@ import {
   FolderOpen,
   Layers,
   Microscope,
+  Sparkles,
   X,
 } from "lucide-react";
+import {
+  NP_DEMO_REFERENCE,
+  NP_DEMO_SITES,
+  loadDemoFastqs,
+} from "@/tools/nanopore-ssm/demo";
 import {
   canContinueFromSources,
   useNanoporeStore,
@@ -48,20 +54,73 @@ export function SourcesStep() {
   const driveFiles = useNanoporeStore((s) => s.driveFiles);
   const setLocalFiles = useNanoporeStore((s) => s.setLocalFiles);
   const setDriveFiles = useNanoporeStore((s) => s.setDriveFiles);
+  const setReferenceSeq = useNanoporeStore((s) => s.setReferenceSeq);
+  const setSites = useNanoporeStore((s) => s.setSites);
+  const setRounds = useNanoporeStore((s) => s.setRounds);
+  const setStep = useNanoporeStore((s) => s.setStep);
   const goNext = useNanoporeStore((s) => s.goNext);
 
   const projectErr = validateProjectName(projectName);
   const canContinue = useNanoporeStore(canContinueFromSources);
+  const [demoBusy, setDemoBusy] = useState(false);
+  const [demoErr, setDemoErr] = useState<string | null>(null);
+  // After loading the demo, briefly highlight every prefilled field so the
+  // user can see what was set without having to compare manually.
+  const [demoLoadedAt, setDemoLoadedAt] = useState<number | null>(null);
+  const demoActive = demoLoadedAt != null && Date.now() - demoLoadedAt < 8000;
+  useEffect(() => {
+    if (demoLoadedAt == null) return;
+    const id = setTimeout(() => setDemoLoadedAt(null), 8000);
+    return () => clearTimeout(id);
+  }, [demoLoadedAt]);
+
+  const handleLoadDemo = async () => {
+    setDemoErr(null);
+    setDemoBusy(true);
+    try {
+      // Pre-fill the form with the 1-site fixture's config + bundled FASTQs.
+      setProjectName("test_nanopore_demo");
+      setPipelineMode("per-round");
+      setReferenceSeq(NP_DEMO_REFERENCE);
+      setSites(
+        NP_DEMO_SITES.map((s, i) => ({
+          ...s,
+          id: `np_site_${i}_${Math.random().toString(36).slice(2, 8)}`,
+        })),
+      );
+      const bundle = await loadDemoFastqs();
+      setRounds(
+        bundle.map((b, i) => ({
+          id: `np_round_${i}_${Math.random().toString(36).slice(2, 8)}`,
+          name: b.round,
+          barcode: "",
+          file: b.file,
+          driveRef: null,
+        })),
+      );
+      setDemoLoadedAt(Date.now());
+    } catch (e) {
+      setDemoErr((e as Error).message);
+    } finally {
+      setDemoBusy(false);
+    }
+  };
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Microscope className="h-4 w-4 text-primary" />
-            Project
-          </CardTitle>
-          <CardDescription>Choose a name to identify this run.</CardDescription>
+    <div className="mx-auto max-w-4xl space-y-6">
+      <Card className={demoActive ? "ring-2 ring-primary/40" : ""}>
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Microscope className="h-4 w-4 text-primary" />
+              Project
+            </CardTitle>
+            <CardDescription>Choose a name to identify this run.</CardDescription>
+          </div>
+          <Button size="sm" variant="outline" onClick={() => void handleLoadDemo()} disabled={demoBusy}>
+            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+            {demoBusy ? "Loading demo…" : "Try with demo data"}
+          </Button>
         </CardHeader>
         <CardContent>
           <div className="space-y-2">
@@ -70,11 +129,23 @@ export function SourcesStep() {
               id="np-project"
               placeholder="e.g. spike_K417_SSM_2026"
               value={projectName}
-              onChange={(e) => setProjectName(sanitizeProjectName(e.target.value))}
+              onChange={(e) => {
+                setDemoLoadedAt(null);
+                setProjectName(sanitizeProjectName(e.target.value));
+              }}
+              className={demoActive ? "ring-2 ring-primary/40" : ""}
             />
             {projectErr && projectName ? (
               <p className="text-xs text-destructive">{projectErr}</p>
             ) : null}
+            {demoErr && <p className="text-xs text-destructive">{demoErr}</p>}
+            {demoActive && (
+              <p className="flex items-center gap-1.5 text-xs text-primary">
+                <Sparkles className="h-3 w-3" />
+                Demo data loaded. Step through Configure → Preview → Run to see
+                a complete walkthrough. Highlight fades in 8s.
+              </p>
+            )}
           </div>
         </CardContent>
       </Card>

@@ -20,7 +20,7 @@ export function ResultsStep() {
 
   if (!outcome) {
     return (
-      <div className="space-y-6">
+      <div className="mx-auto max-w-4xl space-y-6">
         <Card>
           <CardHeader>
             <CardTitle className="text-base">No results yet</CardTitle>
@@ -91,7 +91,7 @@ function ResultsLoaded({
   };
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-4xl space-y-6">
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="Passed QC (all sites)" value={totals.passedQc.toLocaleString()} />
         <StatCard label="WT-baseline reads" value={totals.wt.toLocaleString()} />

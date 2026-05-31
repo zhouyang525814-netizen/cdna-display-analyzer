@@ -55,6 +55,13 @@ export function SourcesStep() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragActive, setDragActive] = useState(false);
   const [demoBusy, setDemoBusy] = useState(false);
+  const [demoLoadedAt, setDemoLoadedAt] = useState<number | null>(null);
+  const demoActive = demoLoadedAt != null && Date.now() - demoLoadedAt < 8000;
+  useEffect(() => {
+    if (demoLoadedAt == null) return;
+    const id = setTimeout(() => setDemoLoadedAt(null), 8000);
+    return () => clearTimeout(id);
+  }, [demoLoadedAt]);
   const [demoErr, setDemoErr] = useState<string | null>(null);
 
   const [fileWarnings, setFileWarnings] = useState<string[]>([]);
@@ -90,22 +97,19 @@ export function SourcesStep() {
     setDemoErr(null);
     try {
       const file = await loadDemoFastq();
-      // Replace any previously-picked files so the demo run is reproducible.
       setLocalFiles([file]);
       setDriveFiles([]);
-      setProjectName("Demo_run");
+      setProjectName("test_ngs_demo");
       setReferenceSeq(DEMO_REFERENCE);
-      // Preserve any existing round ids that match by name; rebuild from
-      // the demo config so cdsStart/cdsEnd are populated and the user can
-      // click straight through to Run.
       const nextRounds = DEMO_ROUNDS.map((r, i) => ({
         ...r,
         id: rounds[i]?.id ?? `demo_${i}_${Date.now()}`,
       }));
       setRounds(nextRounds);
-      // Drop the user right at the Run step — the wizard skipped past
-      // Configure + Preview because everything is already filled in.
-      setStep("run");
+      // Tutorial mode: leave the user on Sources so they can SEE what was
+      // filled (each step's prefilled fields ring in primary) and learn by
+      // walking through. Highlight fades after 8s.
+      setDemoLoadedAt(Date.now());
     } catch (e: unknown) {
       setDemoErr((e as Error).message);
     } finally {
@@ -115,19 +119,28 @@ export function SourcesStep() {
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Project</CardTitle>
-          <CardDescription>Name that appears on your downloaded artifacts.</CardDescription>
+      <Card className={demoActive ? "ring-2 ring-primary/40" : ""}>
+        <CardHeader className="flex flex-row items-start justify-between gap-3">
+          <div>
+            <CardTitle>Project</CardTitle>
+            <CardDescription>Name that appears on your downloaded artifacts.</CardDescription>
+          </div>
+          <Button size="sm" variant="outline" onClick={loadDemo} disabled={demoBusy} className="shrink-0">
+            <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+            {demoBusy ? "Loading demo…" : "Try with demo data"}
+          </Button>
         </CardHeader>
         <CardContent>
           <Label htmlFor="project">Project name</Label>
           <Input
             id="project"
             value={projectName}
-            onChange={(e) => setProjectName(sanitizeProjectName(e.target.value))}
+            onChange={(e) => {
+              setDemoLoadedAt(null);
+              setProjectName(sanitizeProjectName(e.target.value));
+            }}
             maxLength={LIMITS.PROJECT_NAME_MAX}
-            className="mt-1.5 max-w-md"
+            className={`mt-1.5 max-w-md ${demoActive ? "ring-2 ring-primary/40" : ""}`}
             placeholder="e.g. cyclic_peptide_R1_2026"
           />
           {(() => {
@@ -140,32 +153,15 @@ export function SourcesStep() {
               </p>
             );
           })()}
+          {demoErr && <p className="mt-1.5 text-sm text-destructive">{demoErr}</p>}
+          {demoActive && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-xs text-primary">
+              <Sparkles className="h-3 w-3" />
+              Demo data loaded. Step through Configure → Preview → Run to see
+              a complete walkthrough. Highlight fades in 8s.
+            </p>
+          )}
         </CardContent>
-      </Card>
-
-      <Card className="border-primary/30 bg-primary/5">
-        <CardHeader className="flex flex-row items-start justify-between space-y-0 gap-4">
-          <div>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Sparkles className="h-4 w-4 text-primary" />
-              First time here? Try the demo
-            </CardTitle>
-            <CardDescription className="mt-1">
-              Loads a 1,000-read synthetic FASTQ + matching primer config and
-              jumps straight to the Run step. Whole flow finishes in under a
-              second. No Google sign-in needed.
-            </CardDescription>
-          </div>
-          <Button onClick={loadDemo} disabled={demoBusy} className="shrink-0">
-            <Sparkles className="mr-1.5 h-4 w-4" />
-            {demoBusy ? "Loading…" : "Try with demo data"}
-          </Button>
-        </CardHeader>
-        {demoErr && (
-          <CardContent className="pt-0">
-            <p className="text-sm text-destructive">{demoErr}</p>
-          </CardContent>
-        )}
       </Card>
 
       <Card>

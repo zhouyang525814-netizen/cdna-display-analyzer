@@ -9,6 +9,52 @@ Date format: `YYYY-MM-DD`.
 
 ---
 
+## 2026-05-30 — Phase 6.9 — UX polish batch (typo / layout / tutorial)
+
+Round of feedback from the deployed app. All 8 user-reported items addressed:
+
+1. **Header tool name**: cDNA tool's `shortName` flipped from `cDNA-display`
+   to `NGS` so the upper-right pill switcher reads `NGS` ⇄ `Nanopore`
+   (platform-level distinction, parallel labels).
+2. **Default project name**: both tools' stores now initialise
+   `projectName: ""` so the placeholder `e.g. ...` is visible until the user
+   types. (Was `"Unnamed_Project"` for cDNA.)
+3. **UI width unification**: every Nanopore step's root `<div>` now uses
+   `mx-auto max-w-4xl space-y-6`, matching the cDNA tool's container width
+   exactly. The two tools now line up across the wizard.
+4. **Logo → first step**: the upper-left icon + title are now a button.
+   Reads `tool.useSetStep()` and jumps to `tool.steps[0].id`. Doesn't reset
+   data; just navigates. Has a subtle hover scale + bg-muted background.
+5. **NGS QC threshold**: `minMeanPhred` + `minMeanPhredCds` are now in
+   `useRunStore` (default 20.0) and exposed as inputs in the cDNA Configure
+   step's "Filters & settings" card. The RunStep dispatcher reads from the
+   store instead of hardcoding 20.0.
+6. **Site visualisation**: Nanopore Configure now shows a live assembly
+   preview per site:
+   - Per anchor ≥10 bp typed: a pairing-hint row indicating where the
+     anchor matches in the reference (or that it doesn't).
+   - For a fully aligned site: an `AssemblyBox` with the extracted ROI
+     DNA + translated AA on top, plus 6 bp of flanking context. Lets the
+     user see the codon they're about to count without leaving Configure.
+7. **Tutorial mode for both tools**:
+   - cDNA's existing "Try with demo data" button now stays on Sources
+     (instead of jumping to Run) and lights up the prefilled card with a
+     primary ring for 8s. Walk-through path: Sources → Configure → Preview
+     → Run, with the user clicking through to see the data at each step.
+   - Nanopore got a matching button + 1-site demo loader. New file
+     [demo.ts](demo.ts) fetches the 3 round FASTQs from `/sample-data/`
+     and pre-fills `sites[]`, `rounds[]`, `reference`, `projectName`.
+   - Bundled FASTQs copied into `apps/web/public/sample-data/` (was only
+     the cDNA's `sample_1k.fastq` before).
+8. **CDS AA preview in NGS** + **ROI AA preview in Nanopore**:
+   - NGS PreviewStep: new `CdsAaPreview` panel shows DNA + translated AA
+     for the selected CDS region, with stop-codon warning when applicable.
+   - Nanopore Configure: the new `AssemblyBox` already includes the
+     translated AA over the ROI codons.
+
+Engine + tests untouched. Builds: 1,184 KB JS / 263 KB gz (+15 KB / +3 KB gz
+for the new UI features). Core tests still 124 passing.
+
 ## 2026-05-30 — Phase 6.8 — Fix: Drive sign-in in per-round mode + Cancel button
 
 User-reported issues from the first browser test.

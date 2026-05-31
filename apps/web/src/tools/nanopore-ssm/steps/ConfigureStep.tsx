@@ -45,6 +45,7 @@ import {
   sanitizeRoundName,
   validateFastqFileSync,
 } from "@/lib/validation";
+import { translateDna } from "@cdna/core";
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined;
 const API_KEY = import.meta.env.VITE_GOOGLE_API_KEY as string | undefined;
@@ -99,7 +100,7 @@ export function ConfigureStep() {
   })();
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-4xl space-y-6">
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Reference amplicon</CardTitle>
@@ -195,19 +196,12 @@ export function ConfigureStep() {
                   </div>
                 </div>
 
-                {align && (
-                  <div className="mt-2 text-xs">
-                    {align.ok ? (
-                      <span className="text-muted-foreground">
-                        ROI in reference: {align.roiLen} bp ({Math.floor(align.roiLen / 3)} codon
-                        {align.roiLen === 3 ? "" : "s"}) at positions {align.fwStart + site.fwAnchor.length}–{align.rvStart - 1}
-                        {align.message ? <span className="ml-2 text-warning">· {align.message}</span> : null}
-                      </span>
-                    ) : align.message ? (
-                      <span className="text-warning">⚠ {align.message}</span>
-                    ) : null}
-                  </div>
-                )}
+                <SiteAssemblyView
+                  refSeq={alignment.ref}
+                  fwAnchor={site.fwAnchor}
+                  rvAnchor={site.rvAnchor}
+                  alignResult={align}
+                />
               </div>
             );
           })}
@@ -524,6 +518,195 @@ function RoundFilePicker({
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
       {warning && <p className="text-xs text-warning">{warning}</p>}
+    </div>
+  );
+}
+
+/** Live assembly view per site. Shows:
+ *   - For an anchor ≥10 bp typed: where it lands in the reference (exact
+ *     substring match), with the matched span highlighted indigo. Lets the
+ *     user see they typed the right thing before going to Preview.
+ *   - For a fully aligned site (both anchors found in order): the extracted
+ *     ROI DNA with the translated AA above each codon, plus 6 bp of flanking
+ *     context. Mimics the "Show me the sequence" preview from a standard
+ *     codon-optimization tool.
+ *   - When something's off (anchor not in reference, ROI len indivisible by
+ *     3): an amber warning row that explains what's wrong. */
+function SiteAssemblyView({
+  refSeq,
+  fwAnchor,
+  rvAnchor,
+  alignResult,
+}: {
+  refSeq: string;
+  fwAnchor: string;
+  rvAnchor: string;
+  alignResult:
+    | { ok: boolean; fwStart: number; rvStart: number; roiLen: number; message?: string }
+    | undefined;
+}) {
+  const fw = fwAnchor.toUpperCase();
+  const rv = rvAnchor.toUpperCase();
+  const showFwHit = fw.length >= 10 && refSeq.length > 0;
+  const showRvHit = rv.length >= 10 && refSeq.length > 0;
+  const fwHit = showFwHit ? refSeq.indexOf(fw) : -1;
+  const rvHit = showRvHit ? refSeq.indexOf(rv, fwHit >= 0 ? fwHit + fw.length : 0) : -1;
+
+  // No anchor typed yet → nothing to assemble
+  if (fw.length === 0 && rv.length === 0) return null;
+
+  return (
+    <div className="mt-3 space-y-2">
+      {showFwHit && (
+        <PairingHint
+          label="upstream"
+          query={fw}
+          hitIdx={fwHit}
+          refLen={refSeq.length}
+        />
+      )}
+      {showRvHit && (
+        <PairingHint
+          label="downstream"
+          query={rv}
+          hitIdx={rvHit}
+          refLen={refSeq.length}
+        />
+      )}
+
+      {alignResult?.ok && (
+        <AssemblyBox
+          refSeq={refSeq}
+          fwStart={alignResult.fwStart}
+          fwLen={fw.length}
+          rvStart={alignResult.rvStart}
+          rvLen={rv.length}
+          roiLen={alignResult.roiLen}
+        />
+      )}
+
+      {alignResult && !alignResult.ok && alignResult.message && (
+        <div className="rounded-md border border-warning/30 bg-warning/5 p-2 text-xs text-warning">
+          ⚠ {alignResult.message}
+        </div>
+      )}
+      {alignResult?.ok && alignResult.message && (
+        <div className="rounded-md border border-warning/30 bg-warning/5 p-2 text-xs text-warning">
+          ⚠ {alignResult.message}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PairingHint({
+  label,
+  query,
+  hitIdx,
+  refLen,
+}: {
+  label: string;
+  query: string;
+  hitIdx: number;
+  refLen: number;
+}) {
+  if (hitIdx < 0) {
+    return (
+      <div className="rounded-md border border-warning/30 bg-warning/5 p-2 text-xs text-warning">
+        ⚠ {label} anchor not found in reference (yet).
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-md border border-success/30 bg-success/5 p-2 text-xs">
+      <span className="text-success">✓ {label} anchor</span>
+      <span className="text-muted-foreground">
+        {" "}
+        matches reference at position{" "}
+        <span className="font-mono">{hitIdx}</span>–
+        <span className="font-mono">{hitIdx + query.length - 1}</span>
+        {" "}({query.length} bp / {refLen} bp ref)
+      </span>
+    </div>
+  );
+}
+
+function AssemblyBox({
+  refSeq,
+  fwStart,
+  fwLen,
+  rvStart,
+  rvLen,
+  roiLen,
+}: {
+  refSeq: string;
+  fwStart: number;
+  fwLen: number;
+  rvStart: number;
+  rvLen: number;
+  roiLen: number;
+}) {
+  // Context window: 6 bp of flanking sequence on each side so the user can
+  // visually confirm the engine will extract what they expect.
+  const CTX = 6;
+  const winStart = Math.max(0, fwStart + fwLen - CTX);
+  const winEnd = Math.min(refSeq.length, rvStart + CTX);
+  const roiStart = fwStart + fwLen;
+  const roiEnd = rvStart;
+  const roiDna = refSeq.slice(roiStart, roiEnd);
+  const roiAa = roiLen > 0 && roiLen % 3 === 0 ? translateDna(roiDna) : "";
+
+  // Build the per-base spans for the windowed view.
+  const baseSpans: { ch: string; cls: string }[] = [];
+  for (let i = winStart; i < winEnd; i++) {
+    let cls = "text-muted-foreground";
+    if (i >= fwStart + fwLen - CTX && i < fwStart + fwLen) cls = "text-primary font-semibold";
+    else if (i >= roiStart && i < roiEnd)
+      cls = "text-success-foreground bg-success rounded-sm px-px";
+    else if (i >= rvStart && i < rvStart + CTX) cls = "text-primary font-semibold";
+    baseSpans.push({ ch: refSeq[i]!, cls });
+  }
+
+  return (
+    <div className="rounded-md border bg-background p-2.5">
+      <div className="mb-1 text-[10px] uppercase tracking-wider text-muted-foreground">
+        Extracted ROI · {roiLen} bp ({Math.floor(roiLen / 3)} codon
+        {roiLen === 3 ? "" : "s"})
+      </div>
+      <pre className="overflow-x-auto font-mono text-xs leading-relaxed">
+        {/* AA row above the ROI */}
+        {roiAa && (
+          <div className="text-success">
+            <span className="text-muted-foreground/40">{" ".repeat(roiStart - winStart)}</span>
+            {roiAa.split("").map((aa, i) => (
+              <span key={i} className="inline-block">
+                {" "}
+                {aa}{" "}
+              </span>
+            ))}
+          </div>
+        )}
+        <div>
+          {baseSpans.map((s, i) => (
+            <span key={i} className={s.cls}>
+              {s.ch}
+            </span>
+          ))}
+        </div>
+        <div className="text-[10px] text-muted-foreground/60">
+          {" ".repeat(Math.max(0, roiStart - winStart - 1))}↑{" ".repeat(Math.max(0, roiLen - 1))}↑
+        </div>
+      </pre>
+      <div className="mt-1 flex flex-wrap gap-2 text-[11px]">
+        <span className="text-muted-foreground">
+          ROI DNA: <span className="font-mono text-foreground">{roiDna}</span>
+        </span>
+        {roiAa && (
+          <span className="text-muted-foreground">
+            · AA: <span className="font-mono text-success">{roiAa}</span>
+          </span>
+        )}
+      </div>
     </div>
   );
 }

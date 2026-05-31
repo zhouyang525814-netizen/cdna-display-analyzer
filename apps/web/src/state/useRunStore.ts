@@ -74,6 +74,11 @@ interface RunState {
   filterStop: boolean;
   useWasm: boolean;
   pipelineMode: PipelineMode;
+  /** Per-read mean Phred gate. Default 20 (Illumina Q≥20 is the standard
+   *  cutoff for high-confidence base calls). Editable on Configure → Advanced. */
+  minMeanPhred: number;
+  /** Per-CDS-region mean Phred gate (B2 fix). Default 20. */
+  minMeanPhredCds: number;
 
   // Step 3 — preview
   /** Estimated read length, sampled from the first FASTQ during preview. */
@@ -111,6 +116,8 @@ interface RunState {
   setFilterStop: (v: boolean) => void;
   setUseWasm: (v: boolean) => void;
   setPipelineMode: (m: PipelineMode) => void;
+  setMinMeanPhred: (v: number) => void;
+  setMinMeanPhredCds: (v: number) => void;
 
   setPreview: (estReadLen: number, results: PreviewResult[]) => void;
   clearPreview: () => void;
@@ -145,7 +152,7 @@ function defaultRound(idx: number): RoundForm {
 export const useRunStore = create<RunState>((set, get) => ({
   currentStep: "sources",
 
-  projectName: "Unnamed_Project",
+  projectName: "",
   localFiles: [],
   driveFiles: [],
 
@@ -154,6 +161,8 @@ export const useRunStore = create<RunState>((set, get) => ({
   adaptive: true,
   filterStop: true,
   useWasm: true,
+  minMeanPhred: 20,
+  minMeanPhredCds: 20,
   pipelineMode: "multiplexed",
 
   estimatedReadLength: 150,
@@ -197,6 +206,8 @@ export const useRunStore = create<RunState>((set, get) => ({
   setFilterStop: (v) => set({ filterStop: v }),
   setUseWasm: (v) => set({ useWasm: v }),
   setPipelineMode: (m) => set({ pipelineMode: m }),
+  setMinMeanPhred: (v) => set({ minMeanPhred: v }),
+  setMinMeanPhredCds: (v) => set({ minMeanPhredCds: v }),
 
   setPreview: (estReadLen, results) =>
     set({ estimatedReadLength: estReadLen, previewResults: results }),

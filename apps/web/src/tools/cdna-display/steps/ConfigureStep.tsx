@@ -35,6 +35,10 @@ export function ConfigureStep() {
     setFilterStop,
     useWasm,
     setUseWasm,
+    minMeanPhred,
+    setMinMeanPhred,
+    minMeanPhredCds,
+    setMinMeanPhredCds,
     pipelineMode,
     goPrev,
     goNext,
@@ -232,8 +236,42 @@ export function ConfigureStep() {
       <Card>
         <CardHeader>
           <CardTitle>Filters & settings</CardTitle>
+          <CardDescription>
+            Defaults match the Illumina Q≥20 standard. Lower the thresholds
+            only for known-noisy datasets — anything below Q15 is unreliable.
+          </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="qread" className="text-xs">
+                Min mean read Q
+              </Label>
+              <Input
+                id="qread"
+                type="number"
+                value={minMeanPhred}
+                onChange={(e) => setMinMeanPhred(Number(e.target.value) || 0)}
+                className="font-mono text-xs"
+                min={0}
+                max={40}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="qcds" className="text-xs">
+                Min mean CDS-region Q
+              </Label>
+              <Input
+                id="qcds"
+                type="number"
+                value={minMeanPhredCds}
+                onChange={(e) => setMinMeanPhredCds(Number(e.target.value) || 0)}
+                className="font-mono text-xs"
+                min={0}
+                max={40}
+              />
+            </div>
+          </div>
           <ToggleRow
             label="Adaptive: allow length variation (in-frame indels)"
             value={adaptive}

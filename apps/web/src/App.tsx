@@ -17,6 +17,14 @@ export function App() {
   useEffect(() => {
     document.documentElement.dataset.tool = activeToolId;
   }, [activeToolId]);
+
+  // Logo click → jump back to the active tool's first step (Sources). Keeps
+  // the user's data intact — this is navigation, not a reset. Lets a user
+  // who clicked too far quickly get back without hunting through the stepper.
+  const setStep = tool.useSetStep?.();
+  const goHome = () => {
+    if (setStep && tool.steps.length > 0) setStep(tool.steps[0]!.id);
+  };
   // Each tool owns its own currentStep field (cdna-display uses useRunStore,
   // nanopore-ssm uses useNanoporeStore). The Tool definition optionally
   // provides a hook to read the active step; if absent we use the first step.
@@ -29,10 +37,15 @@ export function App() {
     <div className="min-h-screen bg-background">
       <header className="border-b">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
-          <div className="flex items-center gap-2">
-            {Icon ? <Icon className="h-5 w-5 text-primary" /> : null}
+          <button
+            type="button"
+            onClick={goHome}
+            className="group flex items-center gap-2 rounded-md px-1.5 py-0.5 transition hover:bg-muted/60"
+            title="Back to first step"
+          >
+            {Icon ? <Icon className="h-5 w-5 text-primary transition group-hover:scale-110" /> : null}
             <h1 className="text-base font-semibold tracking-tight">{tool.name}</h1>
-          </div>
+          </button>
           <div className="flex items-center gap-3">
             <ToolSwitcher activeId={activeToolId} onChange={setActiveTool} />
             <span className="hidden text-xs text-muted-foreground sm:inline">

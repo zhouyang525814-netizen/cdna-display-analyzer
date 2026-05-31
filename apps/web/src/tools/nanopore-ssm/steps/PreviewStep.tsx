@@ -69,7 +69,7 @@ export function PreviewStep() {
   const allOk = sites.length > 0 && siteAligns.every((a) => a.ok) && !overlapError;
 
   return (
-    <div className="space-y-6">
+    <div className="mx-auto max-w-4xl space-y-6">
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Anchor preview · {sites.length} site{sites.length === 1 ? "" : "s"}</CardTitle>
