@@ -78,18 +78,57 @@ async function runFixture(useWasm: boolean) {
   });
 }
 
-function assertCsvEquals(actual: string, golden: string): void {
-  if (actual === golden) return;
-  const a = actual.split("\n");
-  const g = golden.split("\n");
-  const lines = Math.min(a.length, g.length);
-  for (let i = 0; i < lines; i++) {
-    if (a[i] !== g[i]) {
-      throw new Error(`CSV diverges at line ${i + 1}:\n  expected: ${g[i]}\n  actual:   ${a[i]}`);
-    }
-  }
+// Subset-parity helper: byte-compare only the columns common to both CSVs.
+// As of Phase 6.12 the web tool emits additional columns the desktop Python
+// doesn't (Centered_Enrich, Z, Pval, NegLog10Pval, FDR_q) and drops three
+// derivable ones (Rank, GC_Percent, Present_In_All). The shared columns
+// (Peptide_Seq, Dominant_DNA_Seq, Count_*, RPM_*, Enrich_Step_*, Enrich_Global_*)
+// must still match byte-for-byte to confirm the core algorithm is unchanged.
+function assertCsvSubsetEquals(actual: string, golden: string): void {
+  const a = actual.split("\n").filter((l) => l.length > 0);
+  const g = golden.split("\n").filter((l) => l.length > 0);
+  if (a.length === 0 || g.length === 0) throw new Error("Empty CSV");
   if (a.length !== g.length) {
-    throw new Error(`CSV row count differs: expected ${g.length} lines, got ${a.length}`);
+    throw new Error(`Row count differs: expected ${g.length} (incl header), got ${a.length}`);
+  }
+  const aHeaders = a[0]!.split(",");
+  const gHeaders = g[0]!.split(",");
+  const sharedCols: { name: string; aIdx: number; gIdx: number }[] = [];
+  for (let i = 0; i < gHeaders.length; i++) {
+    const name = gHeaders[i]!;
+    const aIdx = aHeaders.indexOf(name);
+    if (aIdx === -1) continue;
+    sharedCols.push({ name, aIdx, gIdx: i });
+  }
+  if (sharedCols.length < 3) {
+    throw new Error(
+      `Too few shared columns (${sharedCols.length}). Web headers: ${aHeaders.join("|")}. ` +
+        `Golden headers: ${gHeaders.join("|")}.`,
+    );
+  }
+  // The web CSV is sorted by `Enrich_Global_<last>_vs_<first>` (same as the
+  // patched Python). Join on Peptide_Seq instead of row index so a sort drift
+  // can't mask a real numeric divergence.
+  const pepCol = sharedCols.find((c) => c.name === "Peptide_Seq");
+  if (!pepCol) throw new Error("Peptide_Seq must be a shared column for subset parity.");
+  const gByPep = new Map<string, string[]>();
+  for (let r = 1; r < g.length; r++) {
+    const cells = g[r]!.split(",");
+    gByPep.set(cells[pepCol.gIdx]!, cells);
+  }
+  for (let r = 1; r < a.length; r++) {
+    const aCells = a[r]!.split(",");
+    const pep = aCells[pepCol.aIdx]!;
+    const gCells = gByPep.get(pep);
+    if (!gCells) throw new Error(`Web row peptide "${pep}" not present in golden CSV.`);
+    for (const c of sharedCols) {
+      if (aCells[c.aIdx] !== gCells[c.gIdx]) {
+        throw new Error(
+          `Subset-parity divergence at peptide "${pep}", column "${c.name}":\n` +
+            `  golden: ${gCells[c.gIdx]}\n  web:    ${aCells[c.aIdx]}`,
+        );
+      }
+    }
   }
 }
 
@@ -97,19 +136,24 @@ describe.each([
   { label: "TS path", useWasm: false },
   { label: "WASM path", useWasm: true },
 ])("Phase 1+2 parity ($label) vs desktop Python output (sample_1k fixture)", ({ useWasm }) => {
-  it("run_stats.json matches byte-for-byte", async () => {
+  it("run_stats.json: read-counter fields match byte-for-byte", async () => {
+    // Phase 6.12 bumped schema_version to 2 and adds an optional
+    // library_median_enrich block. The read-acceptance counters (rounds.*,
+    // unassigned_breakdown.*, global_unassigned) are unchanged — those are
+    // what the parity guard is for. Parse JSON and compare just those.
     const result = await runFixture(useWasm);
-    const golden = await readFile(path.join(FIX, "golden", "run_stats.json"), "utf8");
-    expect(result.runStatsJson).toBe(golden);
+    const goldenRaw = await readFile(path.join(FIX, "golden", "run_stats.json"), "utf8");
+    const actual = JSON.parse(result.runStatsJson) as Record<string, unknown>;
+    const golden = JSON.parse(goldenRaw) as Record<string, unknown>;
+    expect(actual.global_unassigned).toEqual(golden.global_unassigned);
+    expect(actual.unassigned_breakdown).toEqual(golden.unassigned_breakdown);
+    expect(actual.rounds).toEqual(golden.rounds);
   });
 
-  it("Master_Enrichment_Matrix.csv matches byte-for-byte", async () => {
+  it("Master_Enrichment_Matrix.csv: shared columns match byte-for-byte", async () => {
     const result = await runFixture(useWasm);
     const golden = await readFile(path.join(FIX, "golden", "Master_Enrichment_Matrix.csv"), "utf8");
-    // csvParts: string[] (one entry per line, each "\n"-terminated). Joining
-    // reproduces the legacy single-string output exactly.
     const csv = result.analyzer!.csvParts.join("");
-    assertCsvEquals(csv, golden);
-    expect(csv).toBe(golden);
+    assertCsvSubsetEquals(csv, golden);
   });
 });

@@ -56,7 +56,12 @@ describe("runNanoporeAnalyzer — single site, single round", () => {
     const ala = out.perSiteRows.find((r) => r.Variant_AA === "A")!;
     expect(ala.Count_R0).toBe(50);
     expect(ala.RPM_R0).toBeCloseTo(500_000, 9);
-    expect(ala.Rank_R0).toBe(1); // most abundant
+    // Rank_<r> dropped in Phase 6.12 (derivable). Verify the abundance ordering
+    // via raw counts: Ala (50) > Trp (30) > Phe (10).
+    const phe = out.perSiteRows.find((r) => r.Variant_AA === "F")!;
+    const trp = out.perSiteRows.find((r) => r.Variant_AA === "W")!;
+    expect(ala.Count_R0).toBeGreaterThan(trp.Count_R0 as number);
+    expect(trp.Count_R0).toBeGreaterThan(phe.Count_R0 as number);
     // Enrich_Global vs same round = log2(1) = 0
     expect(ala.Enrich_Global_R0).toBeCloseTo(0, 9);
     // Fitness vs WT for the WT row itself = log2(1) = 0
@@ -121,9 +126,9 @@ describe("runNanoporeAnalyzer — two rounds, single site (enrichment math)", ()
     const expectedEnrich = Math.log2((600_000 + PSEUDO) / (100_000 + PSEUDO));
     expect(tgg.Enrich_Global_R1).toBeCloseTo(expectedEnrich, 9);
 
-    // Rank_R1: TGG=1 (60), GCT=2 (20).
-    expect(tgg.Rank_R1).toBe(1);
-    expect(wt.Rank_R1).toBe(2);
+    // Rank_<r> dropped in Phase 6.12. Verify the abundance ordering via Count
+    // directly: TGG=60 > GCT=20 at R1.
+    expect(tgg.Count_R1).toBeGreaterThan(wt.Count_R1 as number);
   });
 });
 
@@ -251,8 +256,11 @@ describe("runNanoporeAnalyzer — CSV serialization", () => {
 
     // perSiteCsvParts: one "\n"-terminated string per line (header + 2 rows).
     expect(out.perSiteCsvParts.length).toBe(3);
+    // Phase 6.12 schema: Rank_* and GC_Percent dropped; Centered_Fitness,
+    // Z_Fitness, Pval_Fitness, NegLog10Pval_Fitness, FDR_q added for non-
+    // first rounds (here R1 only).
     expect(out.perSiteCsvParts[0]!).toBe(
-      "Site,Variant_AA,Dominant_DNA,GC_Percent,Count_R0,Count_R1,RPM_R0,RPM_R1,Rank_R0,Rank_R1,Enrich_Global_R0,Enrich_Global_R1,Fitness_vs_WT_R0,Fitness_vs_WT_R1\n",
+      "Site,Variant_AA,Dominant_DNA,Count_R0,Count_R1,RPM_R0,RPM_R1,Enrich_Global_R0,Enrich_Global_R1,Fitness_vs_WT_R0,Fitness_vs_WT_R1,Centered_Fitness_R1,Z_Fitness_R1,Pval_Fitness_R1,NegLog10Pval_Fitness_R1,FDR_q_R1\n",
     );
     // Joined view: 2 data rows + 1 header row + trailing newline.
     const joined = out.perSiteCsvParts.join("");

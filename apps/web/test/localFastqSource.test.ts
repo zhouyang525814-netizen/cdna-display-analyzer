@@ -42,8 +42,13 @@ function loadConfig(text: string): { rounds: RoundConfigInput[]; settings: Demul
   return { rounds, settings };
 }
 
-describe("LocalFastqSource via runPipeline → golden CSV", () => {
-  it("Master_Enrichment_Matrix.csv matches byte-for-byte (both TS and WASM)", async () => {
+describe("LocalFastqSource via runPipeline → golden CSV (shared columns)", () => {
+  it("Master_Enrichment_Matrix.csv: Peptide_Seq / Count_* / RPM_* / Enrich_* match golden", async () => {
+    // Phase 6.12 introduced new columns (Centered/Z/Pval/NegLog10Pval/FDR_q)
+    // and dropped derivable ones (Rank/GC/Present_In_All), so byte-for-byte
+    // equality vs the desktop Python golden no longer holds. The columns
+    // common to both must still match exactly — that's the algorithmic
+    // contract this test guards.
     const fastqBytes = await readFile(path.join(CORE_FIX, "sample_1k.fastq"));
     const primersText = await readFile(path.join(CORE_FIX, "primers.yaml"), "utf8");
     const golden = await readFile(path.join(CORE_FIX, "golden/Master_Enrichment_Matrix.csv"), "utf8");
@@ -54,8 +59,36 @@ describe("LocalFastqSource via runPipeline → golden CSV", () => {
 
     for (const useWasm of [false, true]) {
       const result = await runPipeline({ sources: [source], rounds, settings, useWasm });
-      // csvParts: one "\n"-terminated string per line; join for byte-equality.
-      expect(result.analyzer?.csvParts.join(""), `useWasm=${useWasm}`).toBe(golden);
+      const csv = result.analyzer!.csvParts.join("");
+      // Build a header-name → column-index map for both, intersect, and
+      // compare cell values for the shared columns. Join on Peptide_Seq so
+      // a sort drift can't mask a numerical divergence.
+      const aLines = csv.split("\n").filter((l) => l.length > 0);
+      const gLines = golden.split("\n").filter((l) => l.length > 0);
+      const aHeaders = aLines[0]!.split(",");
+      const gHeaders = gLines[0]!.split(",");
+      const shared = gHeaders
+        .map((name, gIdx) => ({ name, gIdx, aIdx: aHeaders.indexOf(name) }))
+        .filter((c) => c.aIdx !== -1);
+      expect(shared.length, `useWasm=${useWasm}`).toBeGreaterThan(3);
+      const pepCol = shared.find((c) => c.name === "Peptide_Seq")!;
+      const gByPep = new Map<string, string[]>();
+      for (let i = 1; i < gLines.length; i++) {
+        const cells = gLines[i]!.split(",");
+        gByPep.set(cells[pepCol.gIdx]!, cells);
+      }
+      for (let i = 1; i < aLines.length; i++) {
+        const aCells = aLines[i]!.split(",");
+        const pep = aCells[pepCol.aIdx]!;
+        const gCells = gByPep.get(pep);
+        expect(gCells, `useWasm=${useWasm}, peptide ${pep}`).toBeTruthy();
+        for (const c of shared) {
+          expect(
+            aCells[c.aIdx],
+            `useWasm=${useWasm}, peptide ${pep}, column ${c.name}`,
+          ).toBe(gCells![c.gIdx]);
+        }
+      }
     }
   });
 

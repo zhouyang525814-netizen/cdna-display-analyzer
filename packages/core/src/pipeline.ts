@@ -221,7 +221,7 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
     stats: engine.stats,
   });
 
-  const runStatsJson = buildRunStatsJson(engine, roundNames);
+  const runStatsJson = buildRunStatsJson(engine, roundNames, analyzer?.libraryMedianEnrich);
 
   return {
     globalUnassigned: engine.globalUnassigned,
@@ -236,24 +236,33 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
   }
 }
 
-// Build the run_stats.json payload with byte-identical formatting to the
-// Python emitter in 01_scripts/app.py: indent=2, sort_keys=True (recursive),
-// no trailing newline. The TS port writes a JSON whose bytes match exactly.
+// Build the run_stats.json payload. Phase 6.12 bumps schema_version to 2:
+// adds `library_median_enrich` (one entry per Enrich_Global_<r> column),
+// which surfaces the CLR-style library-wide shift. Non-zero values flag
+// sequencing-depth or PCR-yield artifacts; strongly negative values flag
+// the "most variants dropped out" regime where Centered_Enrich over-corrects.
+// `library_median_enrich` is omitted (key absent, not "null") when no
+// enrichment columns were emitted (single-round runs), keeping the JSON
+// clean for downstream readers that don't expect the key.
 export function buildRunStatsJson(
   engine: DemultiplexEngine,
   roundNames: ReadonlyArray<string>,
+  libraryMedianEnrich?: Record<string, number>,
 ): string {
   const rounds: Record<string, RoundStats> = {};
   for (const r of roundNames) {
     const s = engine.stats.get(r);
     if (s) rounds[r] = s;
   }
-  const payload = {
-    schema_version: 1,
+  const payload: Record<string, unknown> = {
+    schema_version: 2,
     global_unassigned: engine.globalUnassigned,
     unassigned_breakdown: engine.unassignedBreakdown,
     rounds,
   };
+  if (libraryMedianEnrich && Object.keys(libraryMedianEnrich).length > 0) {
+    payload.library_median_enrich = libraryMedianEnrich;
+  }
   return jsonStringifySortedKeys(payload, 2);
 }
 

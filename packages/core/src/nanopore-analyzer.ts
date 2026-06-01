@@ -27,9 +27,16 @@
 // tiebreaker (stable sort). Haplotype rows sort the same way over the
 // joined-codon AA string.
 
-import { calculateGc, translateDna } from "./dna.js";
+import { translateDna } from "./dna.js";
 import { serializeCsv, type AnalyzerRow, type ColumnSpec, type RowValue } from "./analyzer.js";
 import type { NanoporeRoundStats } from "./nanopore.js";
+import {
+  benjaminiHochberg,
+  median,
+  negLog10P,
+  seLog2WtRatio,
+  twoSidedPvalue,
+} from "./stats.js";
 
 const PSEUDO = 1.0;
 
@@ -64,6 +71,12 @@ export interface NanoporeAnalyzerOutput {
   perSiteCsvParts: string[];
   /** Empty array when haplotype output is disabled or empty. */
   haplotypeCsvParts: string[];
+  /** Library median of `Fitness_vs_WT_<r>`, per (site, round). Surfaces a
+   *  systematic library-wide shift that the Centered_Fitness_<r> column
+   *  corrects for. Keyed as `"<siteName>:<round>"`. Pipeline exposes this
+   *  in run_stats.json so users can spot the strong-dropout regime where
+   *  the centered score over-corrects. */
+  libraryMedianFitness: Record<string, number>;
 }
 
 interface AaAgg {
@@ -73,9 +86,14 @@ interface AaAgg {
 }
 
 export function runNanoporeAnalyzer(input: NanoporeAnalyzerInput): NanoporeAnalyzerOutput {
+  // Accumulator: keyed by `${siteName}:${round}` for per-site medians and
+  // `__haplotype__:${round}` for haplotype medians. Pipeline lifts this into
+  // run_stats.json so users can spot a systematic library shift.
+  const libraryMedianFitness: Record<string, number> = {};
+
   const perSiteRows: NanoporeAnalyzerRow[] = [];
   for (const siteName of input.siteNames) {
-    perSiteRows.push(...aggregatePerSite(input, siteName));
+    perSiteRows.push(...aggregatePerSite(input, siteName, libraryMedianFitness));
   }
 
   const perSiteColumns = buildPerSiteColumns(input.roundNames);
@@ -89,7 +107,7 @@ export function runNanoporeAnalyzer(input: NanoporeAnalyzerInput): NanoporeAnaly
   let haplotypeColumns: ColumnSpec[] = [];
   let haplotypeCsvParts: string[] = [];
   if (wantHaplotype) {
-    haplotypeRows = aggregateHaplotypes(input);
+    haplotypeRows = aggregateHaplotypes(input, libraryMedianFitness);
     haplotypeColumns = buildHaplotypeColumns(input.roundNames);
     haplotypeCsvParts =
       haplotypeRows.length > 0
@@ -104,12 +122,17 @@ export function runNanoporeAnalyzer(input: NanoporeAnalyzerInput): NanoporeAnaly
     haplotypeColumns,
     perSiteCsvParts,
     haplotypeCsvParts,
+    libraryMedianFitness,
   };
 }
 
 // --- Per-site aggregation ---------------------------------------------------
 
-function aggregatePerSite(input: NanoporeAnalyzerInput, siteName: string): NanoporeAnalyzerRow[] {
+function aggregatePerSite(
+  input: NanoporeAnalyzerInput,
+  siteName: string,
+  libraryMedianFitness: Record<string, number>,
+): NanoporeAnalyzerRow[] {
   // Collapse DNA → AA, tracking dominant DNA per AA and per-round count.
   const aaMap = new Map<string, AaAgg>();
   for (const round of input.roundNames) {
@@ -143,12 +166,10 @@ function aggregatePerSite(input: NanoporeAnalyzerInput, siteName: string): Nanop
     wtCounts.set(round, siteDna?.get(wtDna) ?? 0);
   }
 
-  // Per-round rank: sort AAs by count desc and assign 1..N.
-  const ranks = computeRanks(aaMap, input.roundNames);
-
   const firstRound = input.roundNames[0]!;
   const lastRound = input.roundNames[input.roundNames.length - 1]!;
 
+  // ---- Pass 1: per-variant counts + per-round Enrich_Global / Fitness_vs_WT.
   const rows: NanoporeAnalyzerRow[] = [];
   for (const agg of aaMap.values()) {
     const dominantDna = pickDominant(agg.dnaTotals);
@@ -156,7 +177,6 @@ function aggregatePerSite(input: NanoporeAnalyzerInput, siteName: string): Nanop
       Site: siteName,
       Variant_AA: agg.aa,
       Dominant_DNA: dominantDna,
-      GC_Percent: calculateGc(dominantDna),
     };
     const c0 = agg.perRound.get(firstRound) ?? 0;
     const denom0 = denom.get(firstRound) ?? 0;
@@ -169,13 +189,60 @@ function aggregatePerSite(input: NanoporeAnalyzerInput, siteName: string): Nanop
       const wtR = wtCounts.get(round) ?? 0;
       row[`Count_${round}`] = c;
       row[`RPM_${round}`] = rpm;
-      row[`Rank_${round}`] = ranks.get(round)!.get(agg.aa) ?? "";
       row[`Enrich_Global_${round}`] = Math.log2((rpm + PSEUDO) / (rpm0 + PSEUDO));
       row[`Fitness_vs_WT_${round}`] = Math.log2(
         ((c + PSEUDO) / (wtR + PSEUDO)) / ((c0 + PSEUDO) / (wt0 + PSEUDO)),
       );
     }
     rows.push(row);
+  }
+
+  // ---- Pass 2: per-round stats columns (skip round 0 — Fitness_vs_WT_0 is
+  // identically 0 by construction and Z/p/centered would be degenerate).
+  const c0Cache: Record<string, number> = {};
+  const wt0 = wtCounts.get(firstRound) ?? 0;
+  for (const row of rows) c0Cache[String(row.Variant_AA)] = row[`Count_${firstRound}`] as number;
+
+  for (let i = 1; i < input.roundNames.length; i++) {
+    const round = input.roundNames[i]!;
+    const wtR = wtCounts.get(round) ?? 0;
+    const fitnessCol = `Fitness_vs_WT_${round}`;
+    const centeredCol = `Centered_Fitness_${round}`;
+    const zCol = `Z_Fitness_${round}`;
+    const pCol = `Pval_Fitness_${round}`;
+    const nl10pCol = `NegLog10Pval_Fitness_${round}`;
+    const qCol = `FDR_q_${round}`;
+
+    // Per-row SE / Z / p.
+    const pvals: number[] = [];
+    for (const row of rows) {
+      const cR = row[`Count_${round}`] as number;
+      const c0 = c0Cache[String(row.Variant_AA)] ?? 0;
+      const se = seLog2WtRatio(cR, wtR, c0, wt0, PSEUDO);
+      const safeSe = se > 1e-12 ? se : 1e-12;
+      const fitness = row[fitnessCol] as number;
+      const z = fitness / safeSe;
+      const p = twoSidedPvalue(z);
+      row[zCol] = z;
+      row[pCol] = p;
+      row[nl10pCol] = negLog10P(p);
+      pvals.push(p);
+    }
+
+    // Library median of Fitness_vs_WT at (site, round) → centered score.
+    const fitValues: number[] = [];
+    for (const row of rows) fitValues.push(row[fitnessCol] as number);
+    const medFit = median(fitValues);
+    libraryMedianFitness[`${siteName}:${round}`] = medFit;
+    for (const row of rows) {
+      row[centeredCol] = (row[fitnessCol] as number) - medFit;
+    }
+
+    // BH-FDR per round, scoped within this site.
+    const qvals = benjaminiHochberg(pvals);
+    for (let r = 0; r < rows.length; r++) {
+      rows[r]![qCol] = qvals[r]!;
+    }
   }
 
   // Sort: Fitness_vs_WT of last round desc, then Variant_AA asc (stable).
@@ -191,7 +258,10 @@ function aggregatePerSite(input: NanoporeAnalyzerInput, siteName: string): Nanop
 
 // --- Haplotype aggregation ------------------------------------------------
 
-function aggregateHaplotypes(input: NanoporeAnalyzerInput): NanoporeAnalyzerRow[] {
+function aggregateHaplotypes(
+  input: NanoporeAnalyzerInput,
+  libraryMedianFitness: Record<string, number>,
+): NanoporeAnalyzerRow[] {
   // Collapse joined-DNA → joined-AA, tracking dominant DNA + per-round count.
   // joined_dna = "GCT_TGG" etc., split on "_" to translate each codon.
   const aaMap = new Map<string, AaAgg>();
@@ -226,20 +296,16 @@ function aggregateHaplotypes(input: NanoporeAnalyzerInput): NanoporeAnalyzerRow[
     wtCounts.set(round, input.haplotypeCounters.get(round)?.get(wtJoinedDna) ?? 0);
   }
 
-  const ranks = computeRanks(aaMap, input.roundNames);
-
   const firstRound = input.roundNames[0]!;
   const lastRound = input.roundNames[input.roundNames.length - 1]!;
 
+  // ---- Pass 1: counts + fold-change columns.
   const rows: NanoporeAnalyzerRow[] = [];
   for (const agg of aaMap.values()) {
     const dominantDna = pickDominant(agg.dnaTotals);
-    // For haplotype GC%, calculate on the joined DNA WITHOUT underscores.
-    const flatDna = dominantDna.replaceAll("_", "");
     const row: NanoporeAnalyzerRow = {
       Haplotype_AA: agg.aa,
       Haplotype_DNA: dominantDna,
-      GC_Percent: calculateGc(flatDna),
     };
     const c0 = agg.perRound.get(firstRound) ?? 0;
     const denom0 = denom.get(firstRound) ?? 0;
@@ -252,13 +318,55 @@ function aggregateHaplotypes(input: NanoporeAnalyzerInput): NanoporeAnalyzerRow[
       const wtR = wtCounts.get(round) ?? 0;
       row[`Count_${round}`] = c;
       row[`RPM_${round}`] = rpm;
-      row[`Rank_${round}`] = ranks.get(round)!.get(agg.aa) ?? "";
       row[`Enrich_Global_${round}`] = Math.log2((rpm + PSEUDO) / (rpm0 + PSEUDO));
       row[`Fitness_vs_WT_${round}`] = Math.log2(
         ((c + PSEUDO) / (wtR + PSEUDO)) / ((c0 + PSEUDO) / (wt0 + PSEUDO)),
       );
     }
     rows.push(row);
+  }
+
+  // ---- Pass 2: per-round stats columns (skip round 0).
+  const wt0 = wtCounts.get(firstRound) ?? 0;
+  for (let i = 1; i < input.roundNames.length; i++) {
+    const round = input.roundNames[i]!;
+    const wtR = wtCounts.get(round) ?? 0;
+    const fitnessCol = `Fitness_vs_WT_${round}`;
+    const centeredCol = `Centered_Fitness_${round}`;
+    const zCol = `Z_Fitness_${round}`;
+    const pCol = `Pval_Fitness_${round}`;
+    const nl10pCol = `NegLog10Pval_Fitness_${round}`;
+    const qCol = `FDR_q_${round}`;
+
+    const pvals: number[] = [];
+    for (const row of rows) {
+      const cR = row[`Count_${round}`] as number;
+      const c0 = row[`Count_${firstRound}`] as number;
+      const se = seLog2WtRatio(cR, wtR, c0, wt0, PSEUDO);
+      const safeSe = se > 1e-12 ? se : 1e-12;
+      const fitness = row[fitnessCol] as number;
+      const z = fitness / safeSe;
+      const p = twoSidedPvalue(z);
+      row[zCol] = z;
+      row[pCol] = p;
+      row[nl10pCol] = negLog10P(p);
+      pvals.push(p);
+    }
+
+    const fitValues: number[] = [];
+    for (const row of rows) fitValues.push(row[fitnessCol] as number);
+    const medFit = median(fitValues);
+    // Haplotype median keyed with `__haplotype__:<round>` so it's distinct
+    // from per-site medians in the unified libraryMedianFitness record.
+    libraryMedianFitness[`__haplotype__:${round}`] = medFit;
+    for (const row of rows) {
+      row[centeredCol] = (row[fitnessCol] as number) - medFit;
+    }
+
+    const qvals = benjaminiHochberg(pvals);
+    for (let r = 0; r < rows.length; r++) {
+      rows[r]![qCol] = qvals[r]!;
+    }
   }
 
   const fitKey = `Fitness_vs_WT_${lastRound}`;
@@ -285,38 +393,30 @@ function pickDominant(dnaTotals: ReadonlyMap<string, number>): string {
   return best;
 }
 
-function computeRanks(
-  aaMap: ReadonlyMap<string, AaAgg>,
-  roundNames: ReadonlyArray<string>,
-): Map<string, Map<string, number>> {
-  const ranksByRound = new Map<string, Map<string, number>>();
-  for (const round of roundNames) {
-    const sorted = Array.from(aaMap.values())
-      .filter((d) => (d.perRound.get(round) ?? 0) > 0)
-      .sort((a, b) => {
-        const diff = (b.perRound.get(round) ?? 0) - (a.perRound.get(round) ?? 0);
-        if (diff !== 0) return diff;
-        return a.aa.localeCompare(b.aa);
-      });
-    const ranks = new Map<string, number>();
-    for (let i = 0; i < sorted.length; i++) ranks.set(sorted[i]!.aa, i + 1);
-    ranksByRound.set(round, ranks);
-  }
-  return ranksByRound;
-}
+// Phase 6.12: dropped Rank_* and GC_Percent columns; the rank is derivable
+// from Count_* via a 5-line sort, and GC% from `calculateGc(Dominant_DNA)`.
+// Removing them offsets the new statistical columns (Centered_Fitness, Z,
+// Pval, NegLog10Pval, FDR_q) so net CSV width grows modestly. The
+// `computeRanks` helper used to fill Rank_* is no longer needed.
 
 function buildPerSiteColumns(roundNames: ReadonlyArray<string>): ColumnSpec[] {
   const cols: ColumnSpec[] = [
     { name: "Site", type: "string" },
     { name: "Variant_AA", type: "string" },
     { name: "Dominant_DNA", type: "string" },
-    { name: "GC_Percent", type: "float" },
   ];
   for (const r of roundNames) cols.push({ name: `Count_${r}`, type: "int" });
   for (const r of roundNames) cols.push({ name: `RPM_${r}`, type: "float" });
-  for (const r of roundNames) cols.push({ name: `Rank_${r}`, type: "int" });
   for (const r of roundNames) cols.push({ name: `Enrich_Global_${r}`, type: "float" });
   for (const r of roundNames) cols.push({ name: `Fitness_vs_WT_${r}`, type: "float" });
+  // Stats columns skip round 0 — Fitness_vs_WT_0 is identically 0 by
+  // construction and the derived Z / p / centered would be degenerate.
+  const enrichableRounds = roundNames.slice(1);
+  for (const r of enrichableRounds) cols.push({ name: `Centered_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `Z_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `Pval_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `NegLog10Pval_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `FDR_q_${r}`, type: "float" });
   return cols;
 }
 
@@ -324,12 +424,16 @@ function buildHaplotypeColumns(roundNames: ReadonlyArray<string>): ColumnSpec[] 
   const cols: ColumnSpec[] = [
     { name: "Haplotype_AA", type: "string" },
     { name: "Haplotype_DNA", type: "string" },
-    { name: "GC_Percent", type: "float" },
   ];
   for (const r of roundNames) cols.push({ name: `Count_${r}`, type: "int" });
   for (const r of roundNames) cols.push({ name: `RPM_${r}`, type: "float" });
-  for (const r of roundNames) cols.push({ name: `Rank_${r}`, type: "int" });
   for (const r of roundNames) cols.push({ name: `Enrich_Global_${r}`, type: "float" });
   for (const r of roundNames) cols.push({ name: `Fitness_vs_WT_${r}`, type: "float" });
+  const enrichableRounds = roundNames.slice(1);
+  for (const r of enrichableRounds) cols.push({ name: `Centered_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `Z_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `Pval_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `NegLog10Pval_Fitness_${r}`, type: "float" });
+  for (const r of enrichableRounds) cols.push({ name: `FDR_q_${r}`, type: "float" });
   return cols;
 }

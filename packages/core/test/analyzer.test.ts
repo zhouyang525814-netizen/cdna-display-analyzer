@@ -75,10 +75,12 @@ describe("runAnalyzer", () => {
       ]),
       stats: new Map([["R0", mkStats(25)]]),
     })!;
+    // Rank_<r> was dropped in Phase 6.12 (derivable from Count_<r>).
+    // Verify the equivalent assertion against the raw counts.
     const byPeptide = new Map(out.rows.map((r) => [r.Peptide_Seq, r]));
-    expect(byPeptide.get("MK")!.Rank_R0).toBe(1);
-    expect(byPeptide.get("MP")!.Rank_R0).toBe(1);
-    expect(byPeptide.get("MG")!.Rank_R0).toBe(3);
+    expect(byPeptide.get("MK")!.Count_R0).toBe(10);
+    expect(byPeptide.get("MP")!.Count_R0).toBe(10);
+    expect(byPeptide.get("MG")!.Count_R0).toBe(5);
   });
 
   it("computes stepwise + global log2 enrichment with pseudocount 1.0", () => {
@@ -114,7 +116,10 @@ describe("runAnalyzer", () => {
     expect(r["Enrich_Global_R2_vs_R0"]).toBe(Math.log2((0 + 1) / (1000 + 1)));
   });
 
-  it("sets Present_In_All only when every round has count > 0", () => {
+  it("a peptide present in every round has Count_<r> > 0 in every round", () => {
+    // Present_In_All was dropped in Phase 6.12 (trivially derivable).
+    // The contract under test is unchanged: cross-round presence is visible
+    // by inspecting the Count_<r> columns directly.
     const out = runAnalyzer({
       roundNames: ["R0", "R1"],
       dnaCounters: new Map([
@@ -128,8 +133,10 @@ describe("runAnalyzer", () => {
     })!;
     const m = out.rows.find((r) => r.Peptide_Seq === "M")!;
     const a = out.rows.find((r) => r.Peptide_Seq === "A")!;
-    expect(m.Present_In_All).toBe(true);
-    expect(a.Present_In_All).toBe(false);
+    expect(m.Count_R0).toBe(1);
+    expect(m.Count_R1).toBe(1); // present in all
+    expect(a.Count_R0).toBe(1);
+    expect(a.Count_R1).toBe(0); // missing from R1
   });
 
   it("sorts by enrichment desc with Peptide_Seq asc tiebreaker (stable)", () => {
@@ -158,18 +165,16 @@ describe("CSV serialization (pandas parity)", () => {
       stats: new Map([["R0", mkStats(1000)]]),
     })!;
     // csvParts is one entry per line (each terminated with "\n"). Joining
-    // reproduces the historical single-string output for inspection.
+    // reproduces the single-string output for inspection.
     const csv = out.csvParts.join("");
     const lines = csv.trim().split("\n");
-    expect(lines[0]).toBe("Peptide_Seq,Dominant_DNA_Seq,GC_Percent,Count_R0,RPM_R0,Rank_R0,Present_In_All");
-    // RPM = 5/1000 * 1e6 = 5000.0 — should appear as "5000.0" not "5000".
-    expect(lines[1]).toContain(",5000.0,");
-    // Count = 5 — should appear as "5", not "5.0".
-    expect(lines[1]!.split(",")[3]).toBe("5");
-    // Rank — integer.
-    expect(lines[1]!.split(",")[5]).toBe("1");
-    // Present_In_All — capitalized.
-    expect(lines[1]!.endsWith(",True")).toBe(true);
+    // Phase 6.12 schema: Rank_*, GC_Percent, Present_In_All all dropped.
+    // Single-round runs have no Enrich_*/stats columns (those start at i=1).
+    expect(lines[0]).toBe("Peptide_Seq,Dominant_DNA_Seq,Count_R0,RPM_R0");
+    // RPM = 5/1000 * 1e6 = 5000.0 — must appear as "5000.0" not "5000".
+    expect(lines[1]).toContain(",5000.0");
+    // Count = 5 — must appear as "5", not "5.0".
+    expect(lines[1]!.split(",")[2]).toBe("5");
   });
 
   it("ends every row including the last with a single newline", () => {
@@ -189,14 +194,110 @@ describe("CSV serialization (pandas parity)", () => {
   it("matches pandas float repr for a handful of tricky values", () => {
     // serializeCsv goes through pyFloatStr — exercise it via a manual row.
     const parts = serializeCsv(
-      [{ Peptide_Seq: "M", Dominant_DNA_Seq: "ATG", GC_Percent: 33.33333333333333, Present_In_All: false }],
+      [{ Peptide_Seq: "M", Dominant_DNA_Seq: "ATG", GC_Percent: 33.33333333333333 }],
       [
         { name: "Peptide_Seq", type: "string" },
         { name: "Dominant_DNA_Seq", type: "string" },
         { name: "GC_Percent", type: "float" },
-        { name: "Present_In_All", type: "bool" },
       ],
     );
     expect(parts.join("")).toContain("33.33333333333333");
+  });
+});
+
+describe("runAnalyzer — Phase 6.12 new columns", () => {
+  it("emits Centered_Enrich, Z, Pval, NegLog10Pval, FDR_q for non-first rounds", () => {
+    // Two-round setup: one variant with the same RPM in both rounds (neutral),
+    // one with 10x growth (strong enricher). Library size = 2 → median centering
+    // is trivially defined; the centered values should bracket zero.
+    const out = runAnalyzer({
+      roundNames: ["R0", "R1"],
+      dnaCounters: new Map([
+        ["R0", new Map([
+          ["AAA", 100],
+          ["CCC", 100],
+        ])],
+        ["R1", new Map([
+          ["AAA", 100],  // neutral
+          ["CCC", 1000], // 10x
+        ])],
+      ]),
+      stats: new Map([
+        ["R0", mkStats(10_000)],
+        ["R1", mkStats(10_000)],
+      ]),
+    })!;
+    const csv = out.csvParts.join("");
+    const header = csv.split("\n")[0]!;
+    // New columns expected by name; Rank/GC/Present_In_All gone.
+    expect(header).not.toContain("Rank_");
+    expect(header).not.toContain("GC_Percent");
+    expect(header).not.toContain("Present_In_All");
+    expect(header).toContain("Enrich_Global_R1_vs_R0");
+    expect(header).toContain("Centered_Enrich_R1_vs_R0");
+    expect(header).toContain("Z_Enrich_R1_vs_R0");
+    expect(header).toContain("Pval_Enrich_R1_vs_R0");
+    expect(header).toContain("NegLog10Pval_Enrich_R1_vs_R0");
+    expect(header).toContain("FDR_q_R1_vs_R0");
+
+    // The strong enricher row should have a much larger Z than the neutral row.
+    const enricher = out.rows.find((r) => r.Peptide_Seq === "P");  // CCC = Pro
+    const neutral = out.rows.find((r) => r.Peptide_Seq === "K");   // AAA = Lys
+    expect(enricher).toBeTruthy();
+    expect(neutral).toBeTruthy();
+    expect(Math.abs(enricher!["Z_Enrich_R1_vs_R0"] as number)).toBeGreaterThan(
+      Math.abs(neutral!["Z_Enrich_R1_vs_R0"] as number),
+    );
+    // Library median is reported; for this 2-variant library it's the mean of
+    // ~0 and ~log2(10), so ~1.66. Anything in (0, log2(10)) is fine.
+    const med = out.libraryMedianEnrich["Enrich_Global_R1_vs_R0"]!;
+    expect(med).toBeGreaterThan(0);
+    expect(med).toBeLessThan(Math.log2(10));
+  });
+
+  it("FDR_q for round with one strong + many neutral signals stays low for the strong", () => {
+    // 1 enricher (10x) + 30 neutral variants, each with a distinct 6-bp DNA
+    // so the AA-collapsed analyzer sees 31 distinct peptide entries.
+    const r0 = new Map<string, number>();
+    const r1 = new Map<string, number>();
+    // Strong enricher: "ATGAAA" = Met-Lys (MK), 10x R1 vs R0.
+    r0.set("ATGAAA", 200);
+    r1.set("ATGAAA", 2000);
+    // Generate 30 unique DNAs (CCC + 3-base variations) — 64 possible, take 30.
+    // CCC = Proline, so the second codon varies and yields different peptides.
+    const BASES = ["A", "C", "G", "T"];
+    let added = 0;
+    outer: for (const b1 of BASES) {
+      for (const b2 of BASES) {
+        for (const b3 of BASES) {
+          if (added >= 30) break outer;
+          const dna = "CCC" + b1 + b2 + b3;
+          r0.set(dna, 200);
+          r1.set(dna, 200);
+          added++;
+        }
+      }
+    }
+    const out = runAnalyzer({
+      roundNames: ["R0", "R1"],
+      dnaCounters: new Map([
+        ["R0", r0],
+        ["R1", r1],
+      ]),
+      stats: new Map([
+        ["R0", mkStats(100_000)],
+        ["R1", mkStats(100_000)],
+      ]),
+    })!;
+    const enricher = out.rows.find((r) => r.Peptide_Seq === "MK"); // ATG + AAA
+    expect(enricher).toBeTruthy();
+    const q = enricher!["FDR_q_R1_vs_R0"] as number;
+    // Enricher Z ≈ log2(10) / SE  where SE ≈ 0.11 → Z ≈ 30, p ≈ 0.
+    // Even after BH with m ~ many variants, q should be far below 0.05.
+    expect(q).toBeLessThan(0.05);
+    // And the neutrals should have q close to 1 (no signal).
+    const neutral = out.rows.find((r) => r.Peptide_Seq && r.Peptide_Seq !== "MK")!;
+    const qNeutral = neutral["FDR_q_R1_vs_R0"] as number;
+    expect(qNeutral).toBeGreaterThan(0.5);
   });
 });

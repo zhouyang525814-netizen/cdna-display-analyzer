@@ -10,8 +10,15 @@
 //   - booleans capitalized: True / False
 //   - NaN → empty cell, +Inf → "inf", -Inf → "-inf"
 
-import { calculateGc, translateDna } from "./dna.js";
+import { translateDna } from "./dna.js";
 import type { RoundStats } from "./demultiplex.js";
+import {
+  benjaminiHochberg,
+  median,
+  negLog10P,
+  seLog2Ratio,
+  twoSidedPvalue,
+} from "./stats.js";
 
 export interface AnalyzerInput {
   roundNames: ReadonlyArray<string>;
@@ -26,14 +33,22 @@ export type RowValue = string | number | boolean;
 export interface AnalyzerRow {
   Peptide_Seq: string;
   Dominant_DNA_Seq: string;
-  GC_Percent: number;
-  Present_In_All: boolean;
-  [key: string]: RowValue; // Count_*, RPM_*, Rank_*, Enrich_Step_*, Enrich_Global_*
+  [key: string]: RowValue;
+  // Count_*, RPM_*, Enrich_Step_*, Enrich_Global_*,
+  // Centered_Enrich_*, Z_Enrich_*, Pval_Enrich_*, NegLog10Pval_Enrich_*, FDR_q_*
+  // (Rank_*, GC_Percent, Present_In_All were dropped in Phase 6.12 — strictly
+  // derivable from the kept columns, not worth the CSV width.)
 }
 
 export interface AnalyzerOutput {
   rows: AnalyzerRow[];
   columns: ReadonlyArray<ColumnSpec>;
+  /** Library-wide median of `Enrich_Global_<r>` for each non-first round.
+   *  Exposed on the result so the pipeline can surface it in `run_stats.json`
+   *  — non-zero values flag systematic shifts (sequencing-depth or PCR-yield
+   *  artifacts vs real global enrichment). Keyed by the Enrich_Global column
+   *  name (e.g. "Enrich_Global_Round_3_vs_Round_0"). */
+  libraryMedianEnrich: Record<string, number>;
   /** CSV emitted as one string per line, each entry already terminated with
    *  "\n". Splitting the output avoids materializing the entire CSV as one
    *  JS String, which would otherwise hit V8's ~537 MB string-length ceiling
@@ -55,13 +70,12 @@ export function buildColumnSpecs(roundNames: ReadonlyArray<string>): ColumnSpec[
   const cols: ColumnSpec[] = [
     { name: "Peptide_Seq", type: "string" },
     { name: "Dominant_DNA_Seq", type: "string" },
-    { name: "GC_Percent", type: "float" },
   ];
   for (const r of roundNames) cols.push({ name: `Count_${r}`, type: "int" });
-  for (const r of roundNames) {
-    cols.push({ name: `RPM_${r}`, type: "float" });
-    cols.push({ name: `Rank_${r}`, type: "int" });
-  }
+  for (const r of roundNames) cols.push({ name: `RPM_${r}`, type: "float" });
+  // Stepwise log2 fold-change (round_i vs round_{i-1}). Kept per user request
+  // — Enrich_Step is occasionally useful for "did anything jump between R2 and
+  // R3" diagnostics even when Enrich_Global is the headline number.
   for (let i = 1; i < roundNames.length; i++) {
     const prev = roundNames[i - 1];
     const curr = roundNames[i];
@@ -69,33 +83,43 @@ export function buildColumnSpecs(roundNames: ReadonlyArray<string>): ColumnSpec[
   }
   const first = roundNames[0];
   if (first !== undefined) {
+    // Tier-1 score: log2 fold-change vs round 0.
     for (let i = 1; i < roundNames.length; i++) {
       const curr = roundNames[i];
       cols.push({ name: `Enrich_Global_${curr}_vs_${first}`, type: "float" });
     }
+    // Tier-3 score: tier-1 minus library median (CLR-style centering).
+    for (let i = 1; i < roundNames.length; i++) {
+      const curr = roundNames[i];
+      cols.push({ name: `Centered_Enrich_${curr}_vs_${first}`, type: "float" });
+    }
+    // Z = score / SE, p-value, −log10(p), and BH-FDR q-value per round.
+    // Anchored on Enrich_Global (the existing tier-1 fold-change) so users
+    // who already trust that column have a consistent set of inference
+    // numbers next to it. (We do NOT emit SE explicitly — it's derivable
+    // as Enrich_Global / Z.)
+    for (let i = 1; i < roundNames.length; i++) {
+      const curr = roundNames[i];
+      cols.push({ name: `Z_Enrich_${curr}_vs_${first}`, type: "float" });
+    }
+    for (let i = 1; i < roundNames.length; i++) {
+      const curr = roundNames[i];
+      cols.push({ name: `Pval_Enrich_${curr}_vs_${first}`, type: "float" });
+    }
+    for (let i = 1; i < roundNames.length; i++) {
+      const curr = roundNames[i];
+      cols.push({ name: `NegLog10Pval_Enrich_${curr}_vs_${first}`, type: "float" });
+    }
+    for (let i = 1; i < roundNames.length; i++) {
+      const curr = roundNames[i];
+      cols.push({ name: `FDR_q_${curr}_vs_${first}`, type: "float" });
+    }
   }
-  cols.push({ name: "Present_In_All", type: "bool" });
+  // Removed in Phase 6.12 (strictly derivable, low utility for CSV width):
+  //   Rank_<r>      — by Count_<r> sort + min-rank
+  //   GC_Percent    — by `calculateGc(Dominant_DNA_Seq)`
+  //   Present_In_All — by all-Counts-nonzero
   return cols;
-}
-
-// Competition ranking ('min' method), descending. Tied values share the
-// minimum rank; the next distinct value skips ranks accordingly.
-// Matches pandas.Series.rank(method='min', ascending=False).astype(int).
-function rankMinDesc(values: ReadonlyArray<number>): number[] {
-  const n = values.length;
-  const idx = new Array<number>(n);
-  for (let i = 0; i < n; i++) idx[i] = i;
-  idx.sort((a, b) => values[b]! - values[a]!);
-  const ranks = new Array<number>(n);
-  let i = 0;
-  while (i < n) {
-    let j = i;
-    while (j < n && values[idx[j]!] === values[idx[i]!]) j++;
-    const r = i + 1; // 1-based, minimum rank for the tie group
-    for (let k = i; k < j; k++) ranks[idx[k]!] = r;
-    i = j;
-  }
-  return ranks;
 }
 
 interface AaRecord {
@@ -146,8 +170,6 @@ export function runAnalyzer(input: AnalyzerInput): AnalyzerOutput | null {
     const row: AnalyzerRow = {
       Peptide_Seq: aa,
       Dominant_DNA_Seq: domDna,
-      GC_Percent: calculateGc(domDna),
-      Present_In_All: false, // filled in below
     };
     for (const rnd of roundNames) {
       row[`Count_${rnd}`] = rec.counts.get(rnd)!;
@@ -155,19 +177,12 @@ export function runAnalyzer(input: AnalyzerInput): AnalyzerOutput | null {
     rows.push(row);
   }
 
-  // 3. RPM (per million of passed_qc) + competition rank.
+  // 3. RPM (per million of passed_qc).
   for (const rnd of roundNames) {
     const totalValid = stats.get(rnd)?.passed_qc ?? 0;
-    const rpms: number[] = [];
     for (const row of rows) {
       const c = row[`Count_${rnd}`] as number;
-      const rpm = totalValid > 0 ? (c / totalValid) * 1e6 : 0.0;
-      row[`RPM_${rnd}`] = rpm;
-      rpms.push(rpm);
-    }
-    const ranks = rankMinDesc(rpms);
-    for (let i = 0; i < rows.length; i++) {
-      rows[i]![`Rank_${rnd}`] = ranks[i]!;
+      row[`RPM_${rnd}`] = totalValid > 0 ? (c / totalValid) * 1e6 : 0.0;
     }
   }
 
@@ -184,28 +199,55 @@ export function runAnalyzer(input: AnalyzerInput): AnalyzerOutput | null {
     }
   }
   const first = roundNames[0];
+  const libraryMedianEnrich: Record<string, number> = {};
   if (first !== undefined) {
     for (let i = 1; i < roundNames.length; i++) {
       const curr = roundNames[i]!;
-      const col = `Enrich_Global_${curr}_vs_${first}`;
-      for (const row of rows) {
-        const a = row[`RPM_${curr}`] as number;
-        const b = row[`RPM_${first}`] as number;
-        row[col] = Math.log2((a + PSEUDO) / (b + PSEUDO));
-      }
-    }
-  }
+      const enrichCol = `Enrich_Global_${curr}_vs_${first}`;
+      const centeredCol = `Centered_Enrich_${curr}_vs_${first}`;
+      const zCol = `Z_Enrich_${curr}_vs_${first}`;
+      const pCol = `Pval_Enrich_${curr}_vs_${first}`;
+      const nl10pCol = `NegLog10Pval_Enrich_${curr}_vs_${first}`;
+      const qCol = `FDR_q_${curr}_vs_${first}`;
 
-  // 5. Present_In_All: every round has count > 0 for this peptide.
-  for (const row of rows) {
-    let all = true;
-    for (const rnd of roundNames) {
-      if ((row[`Count_${rnd}`] as number) <= 0) {
-        all = false;
-        break;
+      // First pass: tier-1 fold change + Z + p + −log10(p).
+      // Tier-3 score (Centered_Enrich) needs the library median across all
+      // variants, which we compute after this pass.
+      const pvals: number[] = [];
+      for (const row of rows) {
+        const cCurr = row[`Count_${curr}`] as number;
+        const cFirst = row[`Count_${first}`] as number;
+        const rpmCurr = row[`RPM_${curr}`] as number;
+        const rpmFirst = row[`RPM_${first}`] as number;
+        const enrich = Math.log2((rpmCurr + PSEUDO) / (rpmFirst + PSEUDO));
+        const se = seLog2Ratio(cCurr, cFirst, PSEUDO);
+        // SE ≈ 0 implies overwhelming evidence (huge counts). Pick a tiny
+        // floor instead of dividing by 0; Z stays large but finite.
+        const safeSe = se > 1e-12 ? se : 1e-12;
+        const z = enrich / safeSe;
+        const p = twoSidedPvalue(z);
+        row[enrichCol] = enrich;
+        row[zCol] = z;
+        row[pCol] = p;
+        row[nl10pCol] = negLog10P(p);
+        pvals.push(p);
+      }
+
+      // Library median of Enrich_Global at this round → centered score.
+      const enrichValues: number[] = [];
+      for (const row of rows) enrichValues.push(row[enrichCol] as number);
+      const medEnrich = median(enrichValues);
+      libraryMedianEnrich[enrichCol] = medEnrich;
+      for (const row of rows) {
+        row[centeredCol] = (row[enrichCol] as number) - medEnrich;
+      }
+
+      // BH-FDR across all variants for this round's p-values.
+      const qvals = benjaminiHochberg(pvals);
+      for (let r = 0; r < rows.length; r++) {
+        rows[r]![qCol] = qvals[r]!;
       }
     }
-    row.Present_In_All = all;
   }
 
   // 6. Stable sort by primary enrichment desc, secondary Peptide_Seq asc.
@@ -229,7 +271,7 @@ export function runAnalyzer(input: AnalyzerInput): AnalyzerOutput | null {
 
   const columns = buildColumnSpecs(roundNames);
   const csvParts = serializeCsv(rows, columns);
-  return { rows, columns, csvParts };
+  return { rows, columns, csvParts, libraryMedianEnrich };
 }
 
 // CSV cell formatting per pandas.to_csv defaults (na_rep='', quoting=QUOTE_MINIMAL).

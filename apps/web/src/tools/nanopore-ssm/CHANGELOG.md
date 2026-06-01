@@ -9,6 +9,100 @@ Date format: `YYYY-MM-DD`.
 
 ---
 
+## 2026-06-01 — Phase 6.12 — Enrich2-style Z + p + FDR + CLR-centered score
+
+Implements the three-tier enrichment design discussed with the user, modelled
+on Rubin et al. 2017 (*Genome Biology*, Enrich2). Goal: keep the intuitive
+log2 fold-change AND give users statistical inference + a systematic-shift
+correction in the same CSV, without ballooning the column count.
+
+### Schema changes (both tools)
+
+**Removed** (derivable, low utility for CSV width):
+- `Rank_<r>` — derivable from `Count_<r>` via a 5-line sort
+- `GC_Percent` — derivable from `Dominant_DNA(_Seq)` via `calculateGc`
+- `Present_In_All` (cDNA only) — derivable as `all Count_<r> > 0`
+
+**Added per non-first round** (the round-0 baseline is identically 0 for these
+metrics, so we don't emit them there):
+
+| Column | Formula | Notes |
+|---|---|---|
+| `Centered_Enrich_<r>` (cDNA) / `Centered_Fitness_<r>` (Nano) | tier-1 score − **library median** of that score at the round | CLR-style normalization; median chosen over mean for robustness against hit outliers |
+| `Z_<score>_<r>` | score / SE | SE = Poisson delta-method on counts, pseudocount 1.0 (matches existing log2 columns) |
+| `Pval_<score>_<r>` | 2·(1 − Φ(\|Z\|)) | Two-sided z-test, null = "variant behaves like WT" |
+| `NegLog10Pval_<score>_<r>` | −log10(p) | Direct for volcano-plot rendering |
+| `FDR_q_<r>` | Benjamini-Hochberg over all variants in that round | Per round (and per site for Nanopore) |
+
+`SE_<score>_<r>` is deliberately NOT emitted — it's derivable as
+`score / Z`, and the column would add width without serving readers.
+
+### Anchoring
+
+- **cDNA NGS**: Z / p anchored on `Enrich_Global_<r>_vs_<first>` (no explicit
+  WT counter; SE uses two-count Poisson form).
+- **Nanopore**: Z / p anchored on `Fitness_vs_WT_<r>` (four-count Poisson SE
+  with WT terms, exactly the Enrich2 L_v form). FDR is computed per (site,
+  round) — each site is a separate experiment.
+
+### Library median exposed
+
+The library-wide median of the score at each round is surfaced:
+- cDNA: `library_median_enrich` block in `run_stats.json` (schema_version
+  bumped 1 → 2, key is optional so single-round runs stay clean)
+- Nanopore: `libraryMedianFitness` field on the analyzer result, keyed by
+  `"<siteName>:<round>"` for per-site medians and `"__haplotype__:<round>"`
+  for haplotype medians
+
+Non-zero medians flag systematic library shifts. A strongly negative median
+flags the "most variants dropped out" regime where `Centered_<score>` over-
+corrects — surfacing the median lets users detect this honestly rather than
+hiding it inside the centering.
+
+### Net CSV-width impact (4-round run, both tools)
+
+| Tool | Before | Removed | Added | After | Δ |
+|---|---|---|---|---|---|
+| cDNA | 22 cols | −8 | +15 | 29 | +7 |
+| Nanopore | 24 cols | −4 | +15 | 35 | +11 |
+
+Modest growth that fits the substantial inference gain.
+
+### Method choices (each is defensible; document for users)
+
+- **Pseudocount 1.0** for all log2-related computations (existing columns
+  and new SE/Z). Enrich2 uses 0.5; we stay at 1.0 for self-consistency with
+  the unchanged log2 columns. Both are standard; difference negligible
+  except at very low counts.
+- **Wald-type Z (score / SE) from Poisson delta-method.** Anti-conservative
+  at counts < ~5; the pseudocount mitigates. Acceptable for moderate counts;
+  Fisher's exact CI would be more rigorous and can be added later.
+- **BH-FDR**, not Storey q-value. BH is exact under independence; Storey
+  is more powerful but assumes a π0 estimator we don't currently fit.
+- **Median centering**, not mean. Robust against the small-N strong-hit
+  outliers. Documented failure mode: under stringent selection where most
+  variants drop out, the library median itself is strongly negative and
+  the centered score over-corrects toward enrichment.
+
+### Tests
+
+- New `test/stats.test.ts`: normalCdf vs z-table values, two-sided p at
+  standard thresholds, BH textbook example, median NaN-tolerance.
+- `analyzer.test.ts`: header expectations updated; two new tests for Z/p/q
+  shape and signal-vs-noise discrimination.
+- `nanopore-analyzer.test.ts`: header expectations updated.
+- `parity.test.ts`: byte-for-byte CSV parity vs desktop Python relaxed to
+  **subset parity on shared columns** (Peptide_Seq, Count_*, RPM_*,
+  Enrich_*). `run_stats.json` parity uses field-by-field comparison on
+  unchanged blocks since `schema_version` and `library_median_enrich` are
+  intentional additions. The algorithmic contract (read-acceptance counters,
+  Count + Enrich values for shared columns) is still byte-exact.
+- `apps/web/test/localFastqSource.test.ts`: same subset-parity update.
+
+124+ core tests + 7 web tests still pass after the rewrite.
+
+---
+
 ## 2026-06-01 — Phase 6.11 — Remove unreliable "Adaptive" toggle (cDNA tool)
 
 User reported that unchecking the "Adaptive: allow length variation
