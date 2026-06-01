@@ -29,8 +29,6 @@ export function ConfigureStep() {
     updateRound,
     addRound,
     removeRound,
-    adaptive,
-    setAdaptive,
     filterStop,
     setFilterStop,
     useWasm,
@@ -272,11 +270,13 @@ export function ConfigureStep() {
               />
             </div>
           </div>
-          <ToggleRow
-            label="Adaptive: allow length variation (in-frame indels)"
-            value={adaptive}
-            onChange={setAdaptive}
-          />
+          {/* The "Adaptive" toggle was removed in Phase 6.11: when disabled,
+              the engine ran an exact 10-bp Rv-anchor scan that produced more
+              false positives than real indel detections (any chance match of
+              the 10-mer inside the ROI dropped the read; sequencing errors in
+              the anchor silently disabled the check on cleaner reads). The
+              engine still honours `adaptive` for desktop-Python parity; the
+              dispatcher in RunStep hardcodes it to true. */}
           <ToggleRow
             label="Discard CDS with premature stop codons"
             value={filterStop}

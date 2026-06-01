@@ -9,6 +9,49 @@ Date format: `YYYY-MM-DD`.
 
 ---
 
+## 2026-06-01 — Phase 6.11 — Remove unreliable "Adaptive" toggle (cDNA tool)
+
+User reported that unchecking the "Adaptive: allow length variation
+(in-frame indels)" toggle in the cDNA Configure step produced a "disaster"
+on a real per-round run — yield collapsed, `discard_length_indel` spiked.
+
+Root cause: the non-adaptive code path runs an **exact 10-bp Rv-anchor
+scan** over the read tail, searching from `bestFwEndIdx` forward, and drops
+the read whenever the anchor is found *anywhere* before `cdsEndAbs`. Two
+compounding flaws:
+
+1. **Positional-blind search.** `indexOfBytes` returns the first occurrence
+   of the 10-mer anywhere after the Fw anchor, not the match at the
+   expected post-ROI position. For a 69-bp ROI that's 60 candidate windows.
+   A random match probability of ~6×10⁻⁵ per read sounds tiny, but real
+   libraries are not random — short repeats, AT-biased linkers, or any
+   incidental homology between the Rv primer's RC prefix and the ROI
+   itself drives the false-positive rate to near 100%, dropping nearly
+   every read.
+2. **Exact match punishes clean reads.** A single sequencing sub in the
+   anchor returns `rvIdx = -1`, which makes the check pass (skip). So
+   high-quality reads receive the strict gate; noisy reads silently
+   bypass it. Exactly backwards from what the user wants.
+
+The check was also redundant: SSM/cDNA-display variable regions are
+substitution-only by design, and the engine's frameshift check is computed
+on the *configured* `cdsEnd − cdsStart + 1` length, not the observed read
+content, so it can't detect per-read indels regardless.
+
+**Action:**
+- Removed the "Adaptive" toggle from `cdna-display/steps/ConfigureStep`.
+- Hardcoded `adaptive: true` in `cdna-display/steps/RunStep` so the engine
+  always skips the brittle path.
+- Left the `adaptive` field on the engine settings and on the store — the
+  desktop-Python parity test exercises both branches and we don't want to
+  break that contract. The dispatcher just never sends `false` from the
+  web UI again.
+
+The Nanopore tool is unaffected (its dual-anchor scorer uses banded
+alignment, not exact match).
+
+---
+
 ## 2026-06-01 — Phase 6.10 — Lift CSV size ceiling (multi-GB FASTQ support)
 
 User reported `ERROR: Invalid string length` on a per-round NGS run with two

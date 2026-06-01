@@ -172,7 +172,15 @@ export function RunStep() {
           ...(driveToken ? { driveToken } : {}),
           rounds: roundsCfg,
           settings: {
-            adaptive: s.adaptive,
+            // Adaptive=true is hardcoded. The non-adaptive Rv-anchor indel
+            // check was removed from the UI in Phase 6.11: the exact-10-bp
+            // scan dropped reads whenever the Rv-anchor 10-mer happened to
+            // occur inside the ROI by chance (frequent on AT-biased or
+            // repeat-containing libraries) and silently skipped the check on
+            // reads with sequencing errors in the anchor — punishing clean
+            // reads more than dirty ones. The engine still accepts the flag
+            // for desktop-Python parity tests; we just never send false.
+            adaptive: true,
             filterStop: s.filterStop,
             // Read from the store; defaults are 20.0 (Illumina Q≥20 is the
             // standard cutoff for high-confidence base calls). Users can lower
