@@ -75,7 +75,7 @@ describe("runNanoporeAnalyzer — single site, single round", () => {
       emitHaplotype: true,
     });
     expect(out.haplotypeRows.length).toBe(0);
-    expect(out.haplotypeCsv).toBe("");
+    expect(out.haplotypeCsvParts).toEqual([]);
   });
 });
 
@@ -249,12 +249,14 @@ describe("runNanoporeAnalyzer — CSV serialization", () => {
       emitHaplotype: false,
     });
 
-    const firstLine = out.perSiteCsv.split("\n")[0]!;
-    expect(firstLine).toBe(
-      "Site,Variant_AA,Dominant_DNA,GC_Percent,Count_R0,Count_R1,RPM_R0,RPM_R1,Rank_R0,Rank_R1,Enrich_Global_R0,Enrich_Global_R1,Fitness_vs_WT_R0,Fitness_vs_WT_R1",
+    // perSiteCsvParts: one "\n"-terminated string per line (header + 2 rows).
+    expect(out.perSiteCsvParts.length).toBe(3);
+    expect(out.perSiteCsvParts[0]!).toBe(
+      "Site,Variant_AA,Dominant_DNA,GC_Percent,Count_R0,Count_R1,RPM_R0,RPM_R1,Rank_R0,Rank_R1,Enrich_Global_R0,Enrich_Global_R1,Fitness_vs_WT_R0,Fitness_vs_WT_R1\n",
     );
-    // 2 data rows + 1 header row + trailing newline.
-    const lines = out.perSiteCsv.split("\n");
+    // Joined view: 2 data rows + 1 header row + trailing newline.
+    const joined = out.perSiteCsvParts.join("");
+    const lines = joined.split("\n");
     expect(lines.length).toBe(4);
     expect(lines[lines.length - 1]).toBe("");
   });

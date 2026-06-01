@@ -209,3 +209,330 @@ export function parsePerRoundCounts(csv: string): PerRoundCounts {
     roundNames: countCols.map((c) => c.round),
   };
 }
+
+// --------------------------------------------------------------------------
+// Streaming Blob parser
+// --------------------------------------------------------------------------
+//
+// The string-input helpers above require the whole CSV materialized as one
+// JS String. On multi-GB FASTQ runs the analyzer's CSV exceeds V8's
+// ~537 MB string-length ceiling, and `await blob.text()` throws
+// `RangeError: Invalid string length` before we can ever call them.
+//
+// `streamParseEnrichmentBlob` reads the Blob via `blob.stream()` + a streaming
+// TextDecoder, processes records line-by-line with a carry buffer for
+// partial-line bytes at chunk boundaries, and fills all three downstream
+// accumulators (top peptides head, capped matrix, per-round counts) in a
+// single pass. Nothing larger than a few KB is ever held as one string.
+
+export interface TopRow {
+  peptide: string;
+  gc: number;
+  rpm: Record<string, number>;
+  sortValue: number;
+}
+
+export interface TopPreview {
+  rows: TopRow[];
+  totalRows: number;
+  sortColumn: string;
+  roundColumns: string[];
+}
+
+export interface StreamCsvResult {
+  matrix: ParsedMatrix;
+  perRoundCounts: PerRoundCounts;
+  top: TopPreview;
+  /** Total data rows seen (not capped by matrixLimit / topLimit). */
+  totalRows: number;
+}
+
+export interface StreamCsvOptions {
+  /** Cap matrix.rows at this many rows (analyzer pre-sorts so the head is
+   *  the most-enriched). Default 50_000. */
+  matrixLimit?: number;
+  /** Cap top.rows at this many rows. Default 20. */
+  topLimit?: number;
+  /** Optional AbortSignal — aborting interrupts the stream read. */
+  signal?: AbortSignal;
+}
+
+const EMPTY_RESULT: StreamCsvResult = {
+  matrix: { rows: [], roundNames: [] },
+  perRoundCounts: { countsByRound: {}, totalsByRound: {}, roundNames: [] },
+  top: { rows: [], totalRows: 0, sortColumn: "", roundColumns: [] },
+  totalRows: 0,
+};
+
+export async function streamParseEnrichmentBlob(
+  blob: Blob,
+  opts: StreamCsvOptions = {},
+): Promise<StreamCsvResult> {
+  const matrixLimit = opts.matrixLimit ?? 50_000;
+  const topLimit = opts.topLimit ?? 20;
+
+  if (blob.size === 0) return EMPTY_RESULT;
+
+  const reader = blob.stream().getReader();
+  const decoder = new TextDecoder("utf-8");
+  let carry = "";
+
+  // Lazily filled once we've parsed the header line.
+  let header: HeaderPlan | null = null;
+  let totalRows = 0;
+
+  const matrixRows: PeptideRecord[] = [];
+  const topRows: TopRow[] = [];
+  const countsByRound: Record<string, number[]> = {};
+  const totalsByRound: Record<string, number> = {};
+
+  try {
+    while (true) {
+      if (opts.signal?.aborted) throw opts.signal.reason ?? new Error("aborted");
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value || value.length === 0) continue;
+      carry += decoder.decode(value, { stream: true });
+      // Drain every complete line currently in `carry`. The unfinished tail
+      // (everything past the last "\n") stays in `carry` for the next chunk.
+      let nlIdx = carry.indexOf("\n");
+      while (nlIdx !== -1) {
+        const line = carry.slice(0, nlIdx);
+        carry = carry.slice(nlIdx + 1);
+        if (line.length > 0) {
+          if (header === null) {
+            header = planHeader(line);
+            if (!header) return EMPTY_RESULT;
+            for (const r of header.countRounds) {
+              countsByRound[r] = [];
+              totalsByRound[r] = 0;
+            }
+          } else {
+            consumeRow(line, header, {
+              matrixLimit,
+              topLimit,
+              matrixRows,
+              topRows,
+              countsByRound,
+              totalsByRound,
+            });
+            totalRows++;
+          }
+        }
+        nlIdx = carry.indexOf("\n");
+      }
+    }
+    // Flush the decoder + any trailing line without "\n".
+    carry += decoder.decode();
+    if (carry.length > 0 && header !== null) {
+      consumeRow(carry, header, {
+        matrixLimit,
+        topLimit,
+        matrixRows,
+        topRows,
+        countsByRound,
+        totalsByRound,
+      });
+      totalRows++;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  if (!header) return EMPTY_RESULT;
+
+  // Sort per-round counts desc, matching the legacy parsePerRoundCounts shape.
+  for (const r of header.countRounds) {
+    countsByRound[r]!.sort((a, b) => b - a);
+  }
+
+  return {
+    matrix: { rows: matrixRows, roundNames: header.matrixRoundNames },
+    perRoundCounts: {
+      countsByRound,
+      totalsByRound,
+      roundNames: header.countRounds.slice(),
+    },
+    top: {
+      rows: topRows,
+      totalRows,
+      sortColumn: header.topSortColumnName,
+      roundColumns: header.rpmCols.map((c) => c.name),
+    },
+    totalRows,
+  };
+}
+
+// Compact representation of which columns we care about, all pre-located by
+// header index so the per-row hot loop just reads cells[idx].
+interface HeaderPlan {
+  pepCol: number;
+  gcCol: number;
+  dnaCol: number;
+  countCols: { round: string; idx: number }[];
+  rpmCols: { name: string; round: string; idx: number }[];
+  stepwiseCols: { dest: string; idx: number }[];
+  globalCols: { dest: string; idx: number }[];
+  matrixRoundNames: string[];
+  countRounds: string[];
+  // Sort column for the top-N preview.
+  topSortColumnName: string;
+  topSortColumnIdx: number;
+  // The cell index up to which we need to capture in the per-row split.
+  maxIdxNeeded: number;
+}
+
+function planHeader(headerLine: string): HeaderPlan | null {
+  const headers = headerLine.split(",");
+  const pepCol = headers.indexOf("Peptide_Seq");
+  const gcCol = headers.indexOf("GC_Percent");
+  const dnaCol = headers.indexOf("Dominant_DNA_Seq");
+  if (pepCol === -1 || gcCol === -1) return null;
+
+  const countCols: HeaderPlan["countCols"] = [];
+  const rpmCols: HeaderPlan["rpmCols"] = [];
+  const stepwiseCols: HeaderPlan["stepwiseCols"] = [];
+  const globalCols: HeaderPlan["globalCols"] = [];
+  const roundNamesSet = new Set<string>();
+
+  for (let i = 0; i < headers.length; i++) {
+    const h = headers[i]!;
+    if (h.startsWith("Count_")) {
+      const round = h.slice("Count_".length);
+      countCols.push({ round, idx: i });
+      roundNamesSet.add(round);
+    } else if (h.startsWith("RPM_")) {
+      const round = h.slice("RPM_".length);
+      rpmCols.push({ name: h, round, idx: i });
+      roundNamesSet.add(round);
+    } else if (h.startsWith("Enrich_Stepwise_")) {
+      const rest = h.slice("Enrich_Stepwise_".length);
+      const sepIdx = rest.indexOf("_vs_");
+      stepwiseCols.push({ dest: sepIdx === -1 ? rest : rest.slice(0, sepIdx), idx: i });
+    } else if (h.startsWith("Enrich_Global_")) {
+      const rest = h.slice("Enrich_Global_".length);
+      const sepIdx = rest.indexOf("_vs_");
+      globalCols.push({ dest: sepIdx === -1 ? rest : rest.slice(0, sepIdx), idx: i });
+    }
+  }
+
+  const matrixRoundNames = Array.from(roundNamesSet);
+
+  // Sort column for top-N: prefer the last Enrich_Global_*, else the first
+  // RPM column. Same selection as the legacy parseTopPeptides.
+  let topSortColumnName = "";
+  let topSortColumnIdx = -1;
+  if (globalCols.length > 0) {
+    // Manual reverse scan keeps lib target unconstrained (Array.findLast is ES2023).
+    for (let i = headers.length - 1; i >= 0; i--) {
+      const h = headers[i]!;
+      if (h.startsWith("Enrich_Global_")) {
+        topSortColumnName = h;
+        topSortColumnIdx = i;
+        break;
+      }
+    }
+  } else if (rpmCols.length > 0) {
+    topSortColumnName = rpmCols[0]!.name;
+    topSortColumnIdx = rpmCols[0]!.idx;
+  }
+
+  let maxIdxNeeded = Math.max(pepCol, gcCol, dnaCol, topSortColumnIdx);
+  for (const c of countCols) maxIdxNeeded = Math.max(maxIdxNeeded, c.idx);
+  for (const c of rpmCols) maxIdxNeeded = Math.max(maxIdxNeeded, c.idx);
+  for (const c of stepwiseCols) maxIdxNeeded = Math.max(maxIdxNeeded, c.idx);
+  for (const c of globalCols) maxIdxNeeded = Math.max(maxIdxNeeded, c.idx);
+
+  return {
+    pepCol,
+    gcCol,
+    dnaCol,
+    countCols,
+    rpmCols,
+    stepwiseCols,
+    globalCols,
+    matrixRoundNames,
+    countRounds: countCols.map((c) => c.round),
+    topSortColumnName,
+    topSortColumnIdx,
+    maxIdxNeeded,
+  };
+}
+
+interface RowSinkState {
+  matrixLimit: number;
+  topLimit: number;
+  matrixRows: PeptideRecord[];
+  topRows: TopRow[];
+  countsByRound: Record<string, number[]>;
+  totalsByRound: Record<string, number>;
+}
+
+function consumeRow(line: string, plan: HeaderPlan, sink: RowSinkState): void {
+  // Walk commas manually and collect cell boundaries. Cheaper than split()
+  // because we only need up to plan.maxIdxNeeded cells, not the full row.
+  const cellStarts: number[] = new Array(plan.maxIdxNeeded + 2);
+  cellStarts[0] = 0;
+  let col = 1;
+  const len = line.length;
+  for (let i = 0; i < len && col <= plan.maxIdxNeeded + 1; i++) {
+    if (line.charCodeAt(i) === 44 /* ',' */) {
+      cellStarts[col++] = i + 1;
+    }
+  }
+  cellStarts[col] = len + 1;
+
+  const cell = (idx: number): string => {
+    if (idx < 0) return "";
+    const s = cellStarts[idx];
+    const e = cellStarts[idx + 1];
+    if (s == null || e == null) return "";
+    return line.slice(s, e - 1);
+  };
+
+  // (1) per-round counts — always tallied so the rank-abundance / count-
+  // histogram cover the full library, not just the head.
+  for (const { round, idx } of plan.countCols) {
+    const v = Number(cell(idx));
+    if (Number.isFinite(v) && v > 0) {
+      sink.countsByRound[round]!.push(v);
+      sink.totalsByRound[round]! += v;
+    }
+  }
+
+  // (2) matrix.rows — capped.
+  if (sink.matrixRows.length < sink.matrixLimit) {
+    const rec: PeptideRecord = {
+      peptide: cell(plan.pepCol),
+      gc: Number(cell(plan.gcCol)),
+      dominantDna: cell(plan.dnaCol),
+      count: {},
+      rpm: {},
+      stepwise: {},
+      global: {},
+    };
+    for (const c of plan.countCols) rec.count[c.round] = Number(cell(c.idx));
+    for (const c of plan.rpmCols) rec.rpm[c.round] = Number(cell(c.idx));
+    for (const c of plan.stepwiseCols) {
+      const v = cell(c.idx);
+      if (v !== "") rec.stepwise[c.dest] = Number(v);
+    }
+    for (const c of plan.globalCols) {
+      const v = cell(c.idx);
+      if (v !== "") rec.global[c.dest] = Number(v);
+    }
+    sink.matrixRows.push(rec);
+  }
+
+  // (3) top.rows — capped (analyzer is pre-sorted, so head = top).
+  if (sink.topRows.length < sink.topLimit && plan.topSortColumnIdx >= 0) {
+    const rpm: Record<string, number> = {};
+    for (const c of plan.rpmCols) rpm[c.name] = Number(cell(c.idx));
+    sink.topRows.push({
+      peptide: cell(plan.pepCol),
+      gc: Number(cell(plan.gcCol)),
+      rpm,
+      sortValue: Number(cell(plan.topSortColumnIdx)),
+    });
+  }
+}

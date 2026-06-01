@@ -152,10 +152,14 @@ const api = {
 
       // Wrap the CSV in a Blob so postMessage doesn't deep-copy it. Blobs are
       // structured-cloneable but cross by reference, not value — this matters
-      // when the CSV is tens of MB.
-      const csv = result.analyzer?.csv;
-      const csvBlob = csv ? new Blob([csv], { type: "text/csv" }) : null;
-      log(`csv length=${csv?.length ?? 0} → wrapped as Blob`);
+      // when the CSV is tens of MB. We pass `csvParts` (a string[] of one
+      // entry per line) straight to the Blob constructor: it accepts a list
+      // of strings without ever concatenating them into one JS String, so the
+      // CSV bytes can total many GB without tripping V8's ~537 MB string-
+      // length ceiling.
+      const csvParts = result.analyzer?.csvParts ?? null;
+      const csvBlob = csvParts ? new Blob(csvParts, { type: "text/csv" }) : null;
+      log(`csvParts lines=${csvParts?.length ?? 0} → wrapped as Blob (size=${csvBlob?.size ?? 0})`);
 
       return {
         runStatsJson: result.runStatsJson,
@@ -264,11 +268,18 @@ const api = {
         expectedRoiLenBySite[s.name] = s.expectedRoiLen;
       }
 
-      const perSiteCsv = result.analyzer.perSiteCsv;
-      const haplotypeCsv = result.analyzer.haplotypeCsv;
-      const perSiteCsvBlob = perSiteCsv ? new Blob([perSiteCsv], { type: "text/csv" }) : null;
-      const haplotypeCsvBlob = haplotypeCsv ? new Blob([haplotypeCsv], { type: "text/csv" }) : null;
-      log(`csv lengths: per-site=${perSiteCsv?.length ?? 0}, haplotype=${haplotypeCsv?.length ?? 0}`);
+      // Same string[] → Blob pattern as the cDNA path: avoids materializing
+      // multi-GB CSV text as one JS String.
+      const perSiteCsvParts = result.analyzer.perSiteCsvParts;
+      const haplotypeCsvParts = result.analyzer.haplotypeCsvParts;
+      const perSiteCsvBlob =
+        perSiteCsvParts.length > 0 ? new Blob(perSiteCsvParts, { type: "text/csv" }) : null;
+      const haplotypeCsvBlob =
+        haplotypeCsvParts.length > 0 ? new Blob(haplotypeCsvParts, { type: "text/csv" }) : null;
+      log(
+        `csv lines: per-site=${perSiteCsvParts.length}, haplotype=${haplotypeCsvParts.length}` +
+          ` (sizes: per-site=${perSiteCsvBlob?.size ?? 0}, hap=${haplotypeCsvBlob?.size ?? 0})`,
+      );
 
       return {
         perSiteCsvBlob,

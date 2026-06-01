@@ -126,8 +126,10 @@ describe("runNanoporePipeline — 2-site per-round mode (560 bp amplicon)", () =
     }
 
     // --- Analyzer emits both CSVs and haplotype rows show epistasis -------
-    expect(result.analyzer.perSiteCsv.length).toBeGreaterThan(0);
-    expect(result.analyzer.haplotypeCsv.length).toBeGreaterThan(0);
+    // CSVs are now emitted as string[] parts (one entry per line) to avoid
+    // the V8 ~537 MB single-string ceiling on multi-GB runs.
+    expect(result.analyzer.perSiteCsvParts.length).toBeGreaterThan(1); // header + ≥1 row
+    expect(result.analyzer.haplotypeCsvParts.length).toBeGreaterThan(1);
     expect(result.analyzer.haplotypeRows.length).toBeGreaterThan(0);
     // Top haplotype row by Fitness_vs_WT_Round_2 should be the double mutant W_L.
     const topHap = result.analyzer.haplotypeRows[0]!;

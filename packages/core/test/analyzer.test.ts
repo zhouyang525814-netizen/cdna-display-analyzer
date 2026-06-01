@@ -157,7 +157,10 @@ describe("CSV serialization (pandas parity)", () => {
       dnaCounters: new Map([["R0", new Map([["ATG", 5]])]]),
       stats: new Map([["R0", mkStats(1000)]]),
     })!;
-    const lines = out.csv.trim().split("\n");
+    // csvParts is one entry per line (each terminated with "\n"). Joining
+    // reproduces the historical single-string output for inspection.
+    const csv = out.csvParts.join("");
+    const lines = csv.trim().split("\n");
     expect(lines[0]).toBe("Peptide_Seq,Dominant_DNA_Seq,GC_Percent,Count_R0,RPM_R0,Rank_R0,Present_In_All");
     // RPM = 5/1000 * 1e6 = 5000.0 — should appear as "5000.0" not "5000".
     expect(lines[1]).toContain(",5000.0,");
@@ -175,13 +178,17 @@ describe("CSV serialization (pandas parity)", () => {
       dnaCounters: new Map([["R0", new Map([["ATG", 1]])]]),
       stats: new Map([["R0", mkStats(1)]]),
     })!;
-    expect(out.csv.endsWith("\n")).toBe(true);
-    expect(out.csv.endsWith("\n\n")).toBe(false);
+    // Every part is "\n"-terminated, so the joined string ends with exactly
+    // one trailing newline and never with a doubled "\n\n".
+    expect(out.csvParts.every((p) => p.endsWith("\n"))).toBe(true);
+    const joined = out.csvParts.join("");
+    expect(joined.endsWith("\n")).toBe(true);
+    expect(joined.endsWith("\n\n")).toBe(false);
   });
 
   it("matches pandas float repr for a handful of tricky values", () => {
     // serializeCsv goes through pyFloatStr — exercise it via a manual row.
-    const csv = serializeCsv(
+    const parts = serializeCsv(
       [{ Peptide_Seq: "M", Dominant_DNA_Seq: "ATG", GC_Percent: 33.33333333333333, Present_In_All: false }],
       [
         { name: "Peptide_Seq", type: "string" },
@@ -190,6 +197,6 @@ describe("CSV serialization (pandas parity)", () => {
         { name: "Present_In_All", type: "bool" },
       ],
     );
-    expect(csv).toContain("33.33333333333333");
+    expect(parts.join("")).toContain("33.33333333333333");
   });
 });

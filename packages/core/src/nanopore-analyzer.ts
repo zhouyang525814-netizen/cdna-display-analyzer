@@ -58,9 +58,12 @@ export interface NanoporeAnalyzerOutput {
   haplotypeRows: NanoporeAnalyzerRow[];
   perSiteColumns: ColumnSpec[];
   haplotypeColumns: ColumnSpec[];
-  perSiteCsv: string;
-  /** Empty string when haplotype output is disabled or empty. */
-  haplotypeCsv: string;
+  /** Per-line parts (each entry terminated with "\n"). Pass directly to
+   *  `new Blob(parts, …)` for downloads; or `parts.join("")` for inspection.
+   *  Avoids the V8 ~537 MB single-string ceiling on multi-GB runs. */
+  perSiteCsvParts: string[];
+  /** Empty array when haplotype output is disabled or empty. */
+  haplotypeCsvParts: string[];
 }
 
 interface AaAgg {
@@ -79,22 +82,29 @@ export function runNanoporeAnalyzer(input: NanoporeAnalyzerInput): NanoporeAnaly
   // serializeCsv's input type is tied to cDNA's AnalyzerRow shape, but it
   // only ever does column-by-name lookups, so the per-site rows (different
   // schema, same index-signature shape) work fine. Cast at the boundary.
-  const perSiteCsv = serializeCsv(perSiteRows as unknown as AnalyzerRow[], perSiteColumns);
+  const perSiteCsvParts = serializeCsv(perSiteRows as unknown as AnalyzerRow[], perSiteColumns);
 
   const wantHaplotype = input.emitHaplotype && input.siteNames.length >= 2;
   let haplotypeRows: NanoporeAnalyzerRow[] = [];
   let haplotypeColumns: ColumnSpec[] = [];
-  let haplotypeCsv = "";
+  let haplotypeCsvParts: string[] = [];
   if (wantHaplotype) {
     haplotypeRows = aggregateHaplotypes(input);
     haplotypeColumns = buildHaplotypeColumns(input.roundNames);
-    haplotypeCsv =
+    haplotypeCsvParts =
       haplotypeRows.length > 0
         ? serializeCsv(haplotypeRows as unknown as AnalyzerRow[], haplotypeColumns)
-        : "";
+        : [];
   }
 
-  return { perSiteRows, haplotypeRows, perSiteColumns, haplotypeColumns, perSiteCsv, haplotypeCsv };
+  return {
+    perSiteRows,
+    haplotypeRows,
+    perSiteColumns,
+    haplotypeColumns,
+    perSiteCsvParts,
+    haplotypeCsvParts,
+  };
 }
 
 // --- Per-site aggregation ---------------------------------------------------

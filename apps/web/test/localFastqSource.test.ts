@@ -54,7 +54,8 @@ describe("LocalFastqSource via runPipeline → golden CSV", () => {
 
     for (const useWasm of [false, true]) {
       const result = await runPipeline({ sources: [source], rounds, settings, useWasm });
-      expect(result.analyzer?.csv, `useWasm=${useWasm}`).toBe(golden);
+      // csvParts: one "\n"-terminated string per line; join for byte-equality.
+      expect(result.analyzer?.csvParts.join(""), `useWasm=${useWasm}`).toBe(golden);
     }
   });
 

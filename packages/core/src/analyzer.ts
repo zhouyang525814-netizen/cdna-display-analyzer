@@ -34,7 +34,14 @@ export interface AnalyzerRow {
 export interface AnalyzerOutput {
   rows: AnalyzerRow[];
   columns: ReadonlyArray<ColumnSpec>;
-  csv: string;
+  /** CSV emitted as one string per line, each entry already terminated with
+   *  "\n". Splitting the output avoids materializing the entire CSV as one
+   *  JS String, which would otherwise hit V8's ~537 MB string-length ceiling
+   *  on multi-GB FASTQ inputs. Callers wanting the joined string can do
+   *  `csvParts.join("")`; callers wanting a downloadable artifact can pass
+   *  the array straight to `new Blob(csvParts, …)` — Blob accepts a list of
+   *  strings and never concatenates them into one JS String. */
+  csvParts: string[];
 }
 
 type ColType = "string" | "int" | "float" | "bool";
@@ -221,8 +228,8 @@ export function runAnalyzer(input: AnalyzerInput): AnalyzerOutput | null {
   });
 
   const columns = buildColumnSpecs(roundNames);
-  const csv = serializeCsv(rows, columns);
-  return { rows, columns, csv };
+  const csvParts = serializeCsv(rows, columns);
+  return { rows, columns, csvParts };
 }
 
 // CSV cell formatting per pandas.to_csv defaults (na_rep='', quoting=QUOTE_MINIMAL).
@@ -265,19 +272,29 @@ function formatCell(value: RowValue | undefined, type: ColType): string {
   }
 }
 
+/** Serialize rows to CSV as a list of newline-terminated parts.
+ *
+ *  Each entry is one CSV line including its trailing "\n", so
+ *  `parts.join("")` reproduces the historical single-string output exactly.
+ *  Returning an array (instead of joining here) lets callers stream the
+ *  output into a Blob without ever building a multi-GB JS String, which
+ *  otherwise throws `RangeError: Invalid string length` past V8's
+ *  ~537 MB string-length ceiling.
+ *
+ *  pandas to_csv defaults to "\n" line terminator (lineterminator='\n').
+ */
 export function serializeCsv(
   rows: ReadonlyArray<AnalyzerRow>,
   columns: ReadonlyArray<ColumnSpec>,
-): string {
-  const lines: string[] = [];
-  lines.push(columns.map((c) => csvCell(c.name)).join(","));
+): string[] {
+  const out: string[] = [];
+  out.push(columns.map((c) => csvCell(c.name)).join(",") + "\n");
   for (const row of rows) {
     const cells: string[] = [];
     for (const col of columns) {
       cells.push(formatCell(row[col.name], col.type));
     }
-    lines.push(cells.join(","));
+    out.push(cells.join(",") + "\n");
   }
-  // pandas to_csv defaults to \n line terminator (lineterminator='\n').
-  return lines.join("\n") + "\n";
+  return out;
 }

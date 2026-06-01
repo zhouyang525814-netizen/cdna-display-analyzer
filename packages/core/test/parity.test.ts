@@ -106,7 +106,10 @@ describe.each([
   it("Master_Enrichment_Matrix.csv matches byte-for-byte", async () => {
     const result = await runFixture(useWasm);
     const golden = await readFile(path.join(FIX, "golden", "Master_Enrichment_Matrix.csv"), "utf8");
-    assertCsvEquals(result.analyzer!.csv, golden);
-    expect(result.analyzer!.csv).toBe(golden);
+    // csvParts: string[] (one entry per line, each "\n"-terminated). Joining
+    // reproduces the legacy single-string output exactly.
+    const csv = result.analyzer!.csvParts.join("");
+    assertCsvEquals(csv, golden);
+    expect(csv).toBe(golden);
   });
 });

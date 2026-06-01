@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Download, RefreshCw, ArrowLeft } from "lucide-react";
 import { useRunStore } from "@/state/useRunStore";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -12,8 +12,8 @@ import { RankAbundance } from "@/tools/cdna-display/viz/RankAbundance";
 import { SequenceLogo } from "@/tools/cdna-display/viz/SequenceLogo";
 import { VolcanoPlot } from "@/tools/cdna-display/viz/VolcanoPlot";
 import {
-  parseEnrichmentMatrix,
-  parsePerRoundCounts,
+  streamParseEnrichmentBlob,
+  type StreamCsvResult,
 } from "@/tools/cdna-display/viz/csvParse";
 
 export function ResultsStep() {
@@ -39,41 +39,52 @@ export function ResultsStep() {
   const elapsed = state.startedAt && state.finishedAt ? (state.finishedAt - state.startedAt) / 1000 : 0;
 
   // The CSV crosses the worker boundary as a Blob (cheap structured clone by
-  // reference). Read its bytes asynchronously here, then parse top-20 once.
-  // For very large CSVs this is still fast — Blob.text() streams + decodes
-  // off the main thread in modern browsers.
-  const [csvText, setCsvText] = useState<string | null>(null);
+  // reference). On multi-GB runs the CSV can total several GB — well past
+  // V8's ~537 MB single-string ceiling — so we DON'T call `blob.text()`.
+  // Instead, a single streaming pass reads the Blob with `blob.stream()` +
+  // an incremental TextDecoder, fills the top-N preview, the capped matrix
+  // for the per-peptide UI, and the full per-round count arrays in one go.
+  // Nothing larger than a per-line carry buffer (≪ MB) is ever held as a
+  // single JS string.
+  const [parsed, setParsed] = useState<StreamCsvResult | null>(null);
   useEffect(() => {
     let cancelled = false;
     if (outcome.csvBlob) {
-      void outcome.csvBlob.text().then((t) => {
-        if (!cancelled) setCsvText(t);
-      });
+      setParsed(null);
+      void streamParseEnrichmentBlob(outcome.csvBlob, {
+        matrixLimit: 50_000,
+        topLimit: 20,
+      })
+        .then((r) => {
+          if (!cancelled) setParsed(r);
+        })
+        .catch((err) => {
+          // Soft-fail: dashboard widgets just render empty. Download still works.
+          if (!cancelled) {
+            console.error("[ResultsStep] streamParseEnrichmentBlob failed:", err);
+            setParsed(null);
+          }
+        });
     } else {
-      setCsvText(null);
+      setParsed(null);
     }
     return () => {
       cancelled = true;
     };
   }, [outcome.csvBlob]);
-  const topPeptides = useMemo(() => parseTopPeptides(csvText, 20), [csvText]);
 
-  // Two parses serve different needs:
-  //  - `parsedMatrix` is capped at 50k rows because the per-peptide UI
-  //    (volcano, scatter, top-20 table, sequence logo) only ever needs the
-  //    most-enriched head; the analyzer already sorts by global enrichment.
-  //  - `perRoundCounts` walks the full CSV and pulls *only* the Count_*
-  //    columns into compact number arrays. That keeps the rank-abundance
-  //    plot and read-count histogram honest about the whole library — those
-  //    summaries are meaningless if biased by an enrichment-sorted top-N.
-  const parsedMatrix = useMemo(
-    () => parseEnrichmentMatrix(csvText ?? "", 50_000),
-    [csvText],
-  );
-  const perRoundCounts = useMemo(
-    () => parsePerRoundCounts(csvText ?? ""),
-    [csvText],
-  );
+  // Same three views the dashboard expects; produced together by the
+  // streaming parser:
+  //   - top:           head N rows for the preview table (analyzer pre-sorted)
+  //   - matrix:        capped row table for volcano / scatter / logo / etc.
+  //   - perRoundCounts: full per-round count arrays for rank-abundance + histogram
+  const topPeptides = parsed?.top ?? { rows: [], totalRows: 0, sortColumn: "", roundColumns: [] };
+  const parsedMatrix = parsed?.matrix ?? { rows: [], roundNames: [] };
+  const perRoundCounts = parsed?.perRoundCounts ?? {
+    countsByRound: {},
+    totalsByRound: {},
+    roundNames: [],
+  };
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -373,75 +384,3 @@ function YieldBar({ pct }: { pct: number }) {
   );
 }
 
-// Parse the analyzer CSV (returned from the worker) and pluck the top-20 rows
-// to render in the dashboard. We avoid transferring the full row objects
-// across the worker boundary — the CSV is already in hand and is the source
-// of truth anyway.
-interface TopRow {
-  peptide: string;
-  gc: number;
-  rpm: Record<string, number>;
-  sortValue: number;
-}
-function parseTopPeptides(
-  csv: string | null,
-  limit: number,
-): { rows: TopRow[]; totalRows: number; sortColumn: string; roundColumns: string[] } {
-  const empty = { rows: [], totalRows: 0, sortColumn: "", roundColumns: [] };
-  if (!csv) return empty;
-
-  // Bounded scan: walk forward via indexOf to find the first (limit + 1)
-  // newlines so we never materialize the whole CSV as a string array. The
-  // analyzer already sorts the rows, so the top-N is the first N data rows.
-  const headerEnd = csv.indexOf("\n");
-  if (headerEnd === -1) return empty;
-  const headers = csv.slice(0, headerEnd).split(",");
-  const idx = (name: string) => headers.indexOf(name);
-  const pepCol = idx("Peptide_Seq");
-  const gcCol = idx("GC_Percent");
-  const rpmCols = headers
-    .map((h, i) => ({ h, i }))
-    .filter((x) => x.h.startsWith("RPM_"));
-  const enrichGlobalCols = headers
-    .map((h, i) => ({ h, i }))
-    .filter((x) => x.h.startsWith("Enrich_Global_"));
-  const sortCol =
-    enrichGlobalCols.length > 0
-      ? enrichGlobalCols[enrichGlobalCols.length - 1]!
-      : rpmCols[0];
-  if (!sortCol) return empty;
-
-  const rows: TopRow[] = [];
-  let lineStart = headerEnd + 1;
-  while (rows.length < limit) {
-    const lineEnd = csv.indexOf("\n", lineStart);
-    const end = lineEnd === -1 ? csv.length : lineEnd;
-    if (end > lineStart) {
-      const cells = csv.slice(lineStart, end).split(",");
-      const rpm: Record<string, number> = {};
-      for (const { h, i } of rpmCols) rpm[h] = Number(cells[i]);
-      rows.push({
-        peptide: cells[pepCol] ?? "",
-        gc: Number(cells[gcCol]),
-        rpm,
-        sortValue: Number(cells[sortCol.i]),
-      });
-    }
-    if (lineEnd === -1) break;
-    lineStart = lineEnd + 1;
-  }
-
-  // Count remaining rows by counting newlines past where we stopped — cheap
-  // O(n) char scan, no string allocations.
-  let totalRows = rows.length;
-  for (let i = lineStart; i < csv.length; i++) {
-    if (csv.charCodeAt(i) === 10) totalRows++;
-  }
-
-  return {
-    rows,
-    totalRows,
-    sortColumn: sortCol.h,
-    roundColumns: rpmCols.map((x) => x.h),
-  };
-}

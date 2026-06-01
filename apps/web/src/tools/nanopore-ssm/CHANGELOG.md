@@ -9,6 +9,41 @@ Date format: `YYYY-MM-DD`.
 
 ---
 
+## 2026-06-01 — Phase 6.10 — Lift CSV size ceiling (multi-GB FASTQ support)
+
+User reported `ERROR: Invalid string length` on a per-round NGS run with two
+FASTQs each > 5 GB. Root cause: the analyzer's `serializeCsv` joined every
+row into one JS String via `lines.join("\n")`, which trips V8's hard
+`~537 MB` single-string-length ceiling once the unique-peptide set is large
+enough. A second copy of the same hazard sat in the cDNA Results dashboard,
+where `csvBlob.text()` would have re-allocated the whole CSV as one string
+even if the writer had succeeded.
+
+Both pipelines (NGS + Nanopore) are now safe to multi-GB CSV output:
+
+- **Writer**: `serializeCsv` returns `string[]` (one `"\n"`-terminated entry
+  per line). `AnalyzerOutput.csv: string` → `csvParts: string[]`;
+  `NanoporeAnalyzerOutput.perSiteCsv` / `haplotypeCsv` → `…CsvParts:
+  string[]`. The worker now constructs Blobs via `new Blob(parts, …)` —
+  Blob accepts a list of strings without concatenating them, so the bytes
+  live in Blob-managed memory and never form one giant JS String.
+- **Reader (cDNA dashboard)**: replaced `outcome.csvBlob.text()` with a new
+  `streamParseEnrichmentBlob(blob, opts)` in `viz/csvParse.ts`. Uses
+  `blob.stream()` + an incremental `TextDecoder`, processes records line-by-
+  line with a carry buffer for partial-line bytes at chunk boundaries, and
+  fills the top-N preview, capped matrix (50k rows), and full per-round
+  count arrays in a single pass. The Nanopore Results dashboard only
+  downloads its Blobs — no streaming change needed there.
+- **Tests**: parity, analyzer, nanopore-analyzer, nanopore-2site, and the
+  apps/web LocalFastqSource parity test all updated to use
+  `parts.join("")` for byte-equality assertions on the 1k-read fixture.
+  124 core tests + 7 web tests pass; the web build is green.
+
+This removes the file-size cap entirely — the practical ceiling is now
+overall heap pressure from the `dna_counters` Map, not the CSV writer.
+
+---
+
 ## 2026-05-30 — Phase 6.9 — UX polish batch (typo / layout / tutorial)
 
 Round of feedback from the deployed app. All 8 user-reported items addressed:
