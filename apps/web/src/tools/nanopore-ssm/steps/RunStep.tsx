@@ -182,6 +182,10 @@ export function RunStep() {
           setProgress(msg);
           setSourceBytes(msg.sourceIndex, msg.bytesProcessed);
         },
+        // onLog (Phase 6.13): pipeline pushes settings recap, filter-funnel
+        // snapshots, library-median diagnostic, FDR summary. Forward each
+        // entry verbatim into the Nanopore store's log buffer.
+        (m) => pushLog({ ts: Date.now(), tag: m.tag, msg: m.text }),
       );
 
       setOutcome(outcome);

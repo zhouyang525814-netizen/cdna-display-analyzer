@@ -20,6 +20,7 @@ import type {
   NanoporeJob,
   NanoporeOutcome,
   PipelineJob,
+  PipelineLogMsg,
   PipelineProgressMsg,
   PipelineOutcome,
 } from "./types";
@@ -74,6 +75,7 @@ const api = {
   async run(
     job: PipelineJob,
     onProgress?: (msg: PipelineProgressMsg) => void,
+    onLog?: (msg: PipelineLogMsg) => void,
   ): Promise<PipelineOutcome> {
     const log = (m: string, extra?: unknown) => wlog(m, extra);
 
@@ -132,6 +134,7 @@ const api = {
         settings: job.settings,
         useWasm: job.useWasm,
         onProgress: wrappedProgress,
+        ...(onLog ? { onLog } : {}),
         ...(job.mode === "per-round" && job.sourceRoundIndices
           ? { sourceRoundIndices: job.sourceRoundIndices }
           : {}),
@@ -185,6 +188,7 @@ const api = {
   async runNanopore(
     job: NanoporeJob,
     onProgress?: (msg: PipelineProgressMsg) => void,
+    onLog?: (msg: PipelineLogMsg) => void,
   ): Promise<NanoporeOutcome> {
     const log = (m: string, extra?: unknown) => wlog(m, extra);
 
@@ -241,6 +245,7 @@ const api = {
         ...(job.settings ? { settings: job.settings } : {}),
         useWasm: job.useWasm,
         onProgress: wrappedProgress,
+        ...(onLog ? { onLog } : {}),
         ...(job.mode === "per-round" && job.sourceRoundIndices
           ? { sourceRoundIndices: job.sourceRoundIndices }
           : {}),

@@ -9,6 +9,86 @@ Date format: `YYYY-MM-DD`.
 
 ---
 
+## 2026-06-01 — Phase 6.13 — Run-time logging + volcano hit annotations
+
+Responds to user (and their professor's) feedback: a scientific tool should
+show its work *during* the run, not just dump a summary at the end. Adds
+structured logging through the entire stack and improves the volcano plot's
+hit-count readability.
+
+### Run-time log channel (both tools)
+
+New `onLog` callback on `runPipeline` / `runNanoporePipeline` accepting
+`{text, tag}` events. Wired all the way through `worker/types.ts` →
+`workerClient.runInWorker` / `runNanoporeInWorker` → both tools' RunStep
+dispatchers → store `appendLog` / `pushLog`. Each event is appended verbatim
+to the UI's terminal-log panel with the matching colour.
+
+Events emitted by the orchestrator, in order:
+
+1. **Settings recap at start.** WASM on/off, filter thresholds, pseudocount,
+   FDR method, plus a per-round (cDNA) or per-site (Nanopore) anchor preview
+   so the user can verify the engine got the right primer / anchor strings.
+2. **Per-source open.** "Source 1/2: opening HN01.fastq (5.2 GB)"
+3. **Filter-funnel cadence every ~100k records.** Running breakdown of
+   passed-QC / low-Q / no-anchor / ambig / barcode-mismatch / truncated /
+   indel / stop / low-Q-CDS for cDNA, and per-site anchor-found / ROI-indel
+   / low-Q-ROI for Nanopore. Lets users watch the engine work and catch a
+   broken anchor / wrong primer mid-run instead of at the end of an 8-hour
+   job.
+4. **Per-source done summary.** "HN01.fastq done in 142s · 1.8M reads · 850k
+   passed_qc · 23k unique CDS".
+5. **Library-median diagnostic** (the new tier-3 score's normalization
+   constant): one line per round. Tagged `warning` when |median| > 1 so
+   the strong-dropout regime (where the centered score over-corrects) is
+   visible.
+6. **FDR summary.** "Round_3 vs Round_0: 245 variants with FDR < 0.05 (89
+   with FDR < 0.01) out of 12,345 unique peptides". Per-site for Nanopore.
+7. **Total runtime.**
+
+Cadence chosen as 100k records (configurable in code as `LOG_EVERY`). Each
+log call crosses the worker boundary individually, but at 100k-record
+granularity the overhead is in the noise.
+
+### Volcano plot: labeled threshold lines + dual-threshold hit badge
+
+Existing volcano already had the FDR=0.05 reference line and a one-line hit
+count. Three improvements:
+
+- **Labels on the threshold lines.** Both the FDR=0.05 horizontal and the
+  log₂FC=1 vertical lines now carry a small inline label so users don't
+  have to know -log₁₀(0.05) ≈ 1.301 by memory.
+- **Stricter FDR=0.01 line** when at least one variant clears it. Rendered
+  in destructive-color with a different dash pattern. Suppressed entirely
+  when no variant reaches it (avoids visual noise on flat data).
+- **Dual-threshold hit badges.** Two pill badges: "N hits · FDR<0.05" and
+  "M · FDR<0.01" (the strict count only shows when > 0).
+- **Method footnote.** Single small caption: "Right-tail Fisher's exact
+  (small counts) / Yates χ² (large counts) · BH-adjusted FDR". Disambiguates
+  this from the CSV's `Z`/`p`/`FDR_q` columns (which use a Wald-type
+  two-sided test). The two methods test different null hypotheses (the
+  volcano is one-sided "enrichment specifically"; the CSV columns are
+  two-sided "any change vs WT"), so the FDRs won't be identical — the
+  footnote makes that explicit.
+
+### Verified
+
+  - Build: green (1.18 MB JS / 264 KB gz · worker bundle 79 KB)
+  - 148 core tests + 7 web tests passing (no test changes needed — onLog is
+    an optional callback; existing tests don't supply one)
+  - Manual: settings recap and library-median appear in the terminal log
+    immediately on run start; filter-funnel ticks at the expected cadence.
+
+### What's deliberately NOT in this batch
+
+  - Methods card on Results page (formulas + per-run params): user
+    deprioritized for now in favor of these two items.
+  - Column-name tooltips: same — defer to a later UX pass.
+  - In-app result filter, SSM heatmap, codon-usage diagnostic: separate
+    phases as discussed.
+
+---
+
 ## 2026-06-01 — Phase 6.12 — Enrich2-style Z + p + FDR + CLR-centered score
 
 Implements the three-tier enrichment design discussed with the user, modelled

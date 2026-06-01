@@ -193,6 +193,10 @@ export function RunStep() {
           ...(sourceRoundIndices ? { sourceRoundIndices } : {}),
         },
         (p) => useRunStore.getState().updateProgress(p),
+        // onLog (Phase 6.13): pipeline pushes settings recap, filter-funnel
+        // snapshots, library-median diagnostic, FDR summary. Each entry is
+        // appended verbatim to the UI's terminal log panel.
+        (m) => useRunStore.getState().appendLog({ text: m.text, tag: m.tag }),
       );
       const passed = Object.values(outcome.statsByRound).reduce(
         (acc, r) => acc + r.passed_qc,

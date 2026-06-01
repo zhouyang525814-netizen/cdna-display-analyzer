@@ -26,6 +26,10 @@ export interface PipelineRequest {
   rounds: ReadonlyArray<RoundConfigInput>;
   settings: DemultiplexSettings;
   onProgress?: (event: PipelineProgress) => void;
+  /** Human-readable run log channel. Each event is appended verbatim to the
+   *  UI terminal (Phase 6.13). Use sparingly — these cross the worker
+   *  boundary individually, so flood-firing kills throughput. */
+  onLog?: (event: PipelineLogEvent) => void;
   signal?: AbortSignal;
   /** Opt into the WASM scoring hot path. The TS path remains as a reference;
    *  both must produce byte-identical results (asserted by the parity test). */
@@ -42,6 +46,11 @@ export interface PipelineProgress {
   bytesProcessed: number;
   totalBytes: number | null;
   recordsProcessed: number;
+}
+
+export interface PipelineLogEvent {
+  text: string;
+  tag: "info" | "success" | "warning" | "error";
 }
 
 export interface PipelineResult {
@@ -79,6 +88,11 @@ async function* streamToAsyncIter(
 }
 
 export async function runPipeline(req: PipelineRequest): Promise<PipelineResult> {
+  const t0 = performance.now();
+  const log = (text: string, tag: PipelineLogEvent["tag"] = "info"): void => {
+    req.onLog?.({ text, tag });
+  };
+
   const preprocessed = preprocessRounds(req.rounds);
   const wasmScorer = req.useWasm ? createWasmScorer(preprocessed) : undefined;
   // Omit the key when no scorer — exactOptionalPropertyTypes disallows `{wasmScorer: undefined}`.
@@ -86,19 +100,45 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
     ? new DemultiplexEngine(preprocessed, req.settings, { wasmScorer })
     : new DemultiplexEngine(preprocessed, req.settings);
 
+  // Settings recap (Phase 6.13): give the user a paper-trail of exactly what
+  // the engine ran with. Anchor previews + filter thresholds + run topology.
+  log(
+    `Settings · WASM=${req.useWasm ? "on" : "off"}` +
+      ` · adaptive=${req.settings.adaptive}` +
+      ` · filterStop=${req.settings.filterStop}` +
+      ` · minMeanPhred=${req.settings.minMeanPhred.toFixed(1)}` +
+      ` · minMeanPhredCds=${req.settings.minMeanPhredCds.toFixed(1)}` +
+      ` · pseudocount=1.0 · FDR=BH`,
+  );
+  const ASCII_DEC = new TextDecoder("latin1");
+  for (let i = 0; i < preprocessed.length; i++) {
+    const r = preprocessed[i]!;
+    const anchorStr = ASCII_DEC.decode(r.fwAnchor);
+    const bcLen = r.fwBarcode.length;
+    log(
+      `  ${r.name}: Fw anchor=${anchorStr} (${r.fwAnchor.length} bp)` +
+        ` · barcode=${bcLen} bp · CDS=[${r.cdsStart}, ${r.cdsEnd}]`,
+    );
+  }
+
   try {
   for (let srcIdx = 0; srcIdx < req.sources.length; srcIdx++) {
     const source = req.sources[srcIdx]!;
     const desc = source.describe();
-    // Surface entry into each source so a stuck source.open() (e.g. a
-    // Drive fetch that never resolves) is obvious in the log.
-    console.log(`[pipeline] source[${srcIdx}] opening: ${desc.name} (${desc.sizeBytes ?? "?"} bytes)`);
+    const srcSizeStr = desc.sizeBytes != null
+      ? `${(desc.sizeBytes / 1024 / 1024).toFixed(1)} MB`
+      : "?";
+    log(`Source ${srcIdx + 1}/${req.sources.length}: opening ${desc.name} (${srcSizeStr})`);
     const stream = await source.open(req.signal);
-    console.log(`[pipeline] source[${srcIdx}] stream opened, beginning read loop`);
 
     let bytesProcessed = 0;
     let recordsProcessed = 0;
     let lastReportedBytes = 0;
+    const tSrc0 = performance.now();
+    // Filter-funnel log cadence: emit a running breakdown roughly every
+    // 100k records so users see counters move during long runs.
+    let lastLogRecord = 0;
+    const LOG_EVERY = 100_000;
     // Three scratch buffers, reused across every read on this source:
     //   - upScratch / upQualScratch: forward-strand uppercase-normalised
     //     seq and qual (B5 fix — readers can produce soft-masked lowercase
@@ -203,6 +243,32 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
             recordsProcessed,
           });
         }
+        // Filter-funnel cadence (Phase 6.13): every ~LOG_EVERY records, dump
+        // a running breakdown so users see counters move during long runs.
+        // Cost is negligible (one log line per ~100k reads); the running
+        // totals come from cheap fields already maintained on the engine.
+        if (req.onLog && recordsProcessed - lastLogRecord >= LOG_EVERY) {
+          lastLogRecord = recordsProcessed;
+          let passed = 0;
+          let truncated = 0;
+          let lenIndel = 0;
+          let stop = 0;
+          let lowQCds = 0;
+          for (const s of engine.stats.values()) {
+            passed += s.passed_qc;
+            truncated += s.discard_truncated;
+            lenIndel += s.discard_length_indel;
+            stop += s.discard_stop_codon;
+            lowQCds += s.discard_low_quality_cds;
+          }
+          const u = engine.unassignedBreakdown;
+          log(
+            `  …${(recordsProcessed / 1000).toFixed(0)}k reads · passed_qc=${passed}` +
+              ` · lowQ=${u.low_quality} · noAnchor=${u.no_anchor}` +
+              ` · ambig=${u.ambiguous} · bcMismatch=${u.barcode_mismatch}` +
+              ` · trunc=${truncated} · indel=${lenIndel} · stop=${stop} · lowQcds=${lowQCds}`,
+          );
+        }
       }
     } finally {
       req.onProgress?.({
@@ -212,16 +278,79 @@ export async function runPipeline(req: PipelineRequest): Promise<PipelineResult>
         recordsProcessed,
       });
     }
+    // Per-source completion summary (Phase 6.13). Use the *running* engine
+    // totals: in per-round mode this corresponds to a single round's data;
+    // in multiplexed mode this reflects everything seen so far.
+    const dt = ((performance.now() - tSrc0) / 1000).toFixed(1);
+    if (boundRoundIdx >= 0) {
+      // Per-round mode → the bound round's stats are this source's stats.
+      const cfg = preprocessed[boundRoundIdx]!;
+      const s = engine.stats.get(cfg.name)!;
+      const counter = engine.dnaCounters.get(cfg.name)!;
+      log(
+        `  ${desc.name} done in ${dt}s · ${recordsProcessed} reads` +
+          ` · ${s.passed_qc} passed_qc · ${counter.size} unique CDS`,
+        "success",
+      );
+    } else {
+      log(
+        `  ${desc.name} done in ${dt}s · ${recordsProcessed} reads processed`,
+        "success",
+      );
+    }
   }
 
+  const tAnalyzer0 = performance.now();
+  log("Demultiplex complete; running analyzer (DNA→AA, RPM, enrichment, Z, p, FDR)…");
   const roundNames = req.rounds.map((r) => r.name);
   const analyzer = runAnalyzer({
     roundNames,
     dnaCounters: engine.dnaCounters,
     stats: engine.stats,
   });
+  const dtAnalyzer = ((performance.now() - tAnalyzer0) / 1000).toFixed(1);
+
+  // Phase 6.13 end-of-run reporting: library-median diagnostic + FDR summary.
+  if (analyzer) {
+    const med = analyzer.libraryMedianEnrich;
+    for (const colName of Object.keys(med)) {
+      const m = med[colName]!;
+      const flag = m < -1
+        ? "warning"
+        : m > 1
+        ? "warning"
+        : "info";
+      const tag = flag === "warning" ? "⚠ " : "";
+      log(`Library median ${colName} = ${m.toFixed(3)} ${tag}`, flag as PipelineLogEvent["tag"]);
+    }
+    // Count hits per enrichable round at standard FDR thresholds.
+    const lastRound = roundNames[roundNames.length - 1];
+    const firstRound = roundNames[0];
+    if (lastRound && firstRound && lastRound !== firstRound) {
+      const qCol = `FDR_q_${lastRound}_vs_${firstRound}`;
+      let q05 = 0;
+      let q01 = 0;
+      for (const row of analyzer.rows) {
+        const q = row[qCol] as number;
+        if (Number.isFinite(q)) {
+          if (q < 0.05) q05++;
+          if (q < 0.01) q01++;
+        }
+      }
+      log(
+        `${lastRound} vs ${firstRound}: ${q05.toLocaleString()} variants with FDR < 0.05` +
+          ` (${q01.toLocaleString()} with FDR < 0.01)` +
+          ` out of ${analyzer.rows.length.toLocaleString()} unique peptides`,
+        q05 > 0 ? "success" : "info",
+      );
+    }
+    log(`Analyzer: ${dtAnalyzer}s · ${analyzer.rows.length.toLocaleString()} unique peptides`);
+  } else {
+    log("Analyzer: no peptides emitted (empty counters).", "warning");
+  }
 
   const runStatsJson = buildRunStatsJson(engine, roundNames, analyzer?.libraryMedianEnrich);
+  log(`Total runtime: ${((performance.now() - t0) / 1000).toFixed(1)}s`, "success");
 
   return {
     globalUnassigned: engine.globalUnassigned,

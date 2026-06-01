@@ -20,7 +20,11 @@ import type { PeptideRecord } from "./csvParse";
 import { computeEnrichmentTests } from "./stats";
 import { ChartPanel } from "./ChartPanel";
 
+// Phase 6.13: dual-threshold visualization. We surface the FDR<0.05 hit count
+// (the standard reporting threshold) AND the stricter FDR<0.01 count so users
+// can tell at a glance how robust the signal is.
 const FDR_THRESHOLD = 0.05;
+const FDR_STRICT = 0.01;
 const LFC_THRESHOLD = 1;
 const MAX_POINTS_PER_PANEL = 5000;
 
@@ -34,9 +38,10 @@ interface VolcanoPoint {
 
 interface Panel {
   title: string;
-  significantCount: number;
-  totalPlotted: number;
+  significantCount: number;       // FDR < 0.05 AND |log2FC| > 1
+  strictHitCount: number;          // FDR < 0.01 AND |log2FC| > 1
   totalAvailable: number;
+  totalPlotted: number;
   points: VolcanoPoint[];
 }
 
@@ -55,9 +60,11 @@ function buildPanel(
     totalsByRound[dest] ?? 0,
   );
   let sig = 0;
+  let strict = 0;
   const allPoints: VolcanoPoint[] = tests.map((t) => {
     const significant = t.fdr < FDR_THRESHOLD && t.log2FC > LFC_THRESHOLD;
     if (significant) sig++;
+    if (t.fdr < FDR_STRICT && t.log2FC > LFC_THRESHOLD) strict++;
     return {
       x: t.log2FC,
       y: -Math.log10(Math.max(t.fdr, 1e-300)),
@@ -89,6 +96,7 @@ function buildPanel(
   return {
     title: `${label}: ${dest} vs ${src}`,
     significantCount: sig,
+    strictHitCount: strict,
     totalPlotted: points.length,
     totalAvailable: allPoints.length,
     points,
@@ -180,17 +188,32 @@ function VolcanoPanel({ panel }: { panel: Panel }) {
   const absMaxX = Math.max(2, ...panel.points.map((p) => Math.abs(p.x)));
   const maxY = Math.max(2, ...panel.points.map((p) => p.y));
   const cutoffY = -Math.log10(FDR_THRESHOLD);
+  const strictCutoffY = -Math.log10(FDR_STRICT);
   // Slug-safe filename for the download: "Stepwise: R1 vs R0" → "volcano_Stepwise_R1_vs_R0"
   const filename = `volcano_${panel.title.replace(/[^a-zA-Z0-9]+/g, "_")}`;
 
   return (
     <div>
-      <div className="mb-2 flex items-baseline justify-between text-xs">
+      <div className="mb-2 flex items-baseline justify-between gap-2 text-xs">
         <span className="font-medium">{panel.title}</span>
-        <span className="font-mono text-muted-foreground">
-          {panel.significantCount.toLocaleString()} significant ·{" "}
-          FDR &lt; {FDR_THRESHOLD} &amp; log₂FC &gt; {LFC_THRESHOLD}
-        </span>
+        {/* Dual-threshold hit badges. Phase 6.13: split FDR<0.05 and FDR<0.01
+            so users can spot how robust the signal is at a glance. */}
+        <div className="flex flex-wrap items-center gap-1.5 font-mono">
+          <span
+            className="rounded-md border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 text-destructive"
+            title={`FDR < ${FDR_THRESHOLD} AND log₂FC > ${LFC_THRESHOLD}`}
+          >
+            {panel.significantCount.toLocaleString()} hits · FDR&lt;{FDR_THRESHOLD}
+          </span>
+          {panel.strictHitCount > 0 ? (
+            <span
+              className="rounded-md border border-destructive/60 bg-destructive/20 px-1.5 py-0.5 text-destructive"
+              title={`Stricter threshold: FDR < ${FDR_STRICT} AND log₂FC > ${LFC_THRESHOLD}`}
+            >
+              {panel.strictHitCount.toLocaleString()} · FDR&lt;{FDR_STRICT}
+            </span>
+          ) : null}
+        </div>
       </div>
       <ChartPanel filename={filename} className="h-[300px]">
         <ResponsiveContainer width="100%" height="100%">
@@ -225,17 +248,48 @@ function VolcanoPanel({ panel }: { panel: Panel }) {
               width={42}
             />
             <ZAxis range={[16, 16]} />
+            {/* FDR=0.05 reference line, now labeled. Phase 6.13. */}
             <ReferenceLine
               y={cutoffY}
               stroke="hsl(var(--muted-foreground))"
               strokeDasharray="3 3"
               strokeWidth={1}
+              label={{
+                value: `FDR=${FDR_THRESHOLD}`,
+                position: "insideTopRight",
+                fill: "hsl(var(--muted-foreground))",
+                fontSize: 9,
+              }}
             />
+            {/* FDR=0.01 reference line — only show if any hits clear it,
+                otherwise it's just visual noise. */}
+            {panel.strictHitCount > 0 && strictCutoffY <= Math.ceil(maxY) ? (
+              <ReferenceLine
+                y={strictCutoffY}
+                stroke="hsl(var(--destructive))"
+                strokeDasharray="2 4"
+                strokeOpacity={0.5}
+                strokeWidth={1}
+                label={{
+                  value: `FDR=${FDR_STRICT}`,
+                  position: "insideTopRight",
+                  fill: "hsl(var(--destructive))",
+                  fontSize: 9,
+                  fillOpacity: 0.7,
+                }}
+              />
+            ) : null}
             <ReferenceLine
               x={LFC_THRESHOLD}
               stroke="hsl(var(--muted-foreground))"
               strokeDasharray="3 3"
               strokeWidth={1}
+              label={{
+                value: `log₂FC=${LFC_THRESHOLD}`,
+                position: "insideTopRight",
+                fill: "hsl(var(--muted-foreground))",
+                fontSize: 9,
+              }}
             />
             <Tooltip content={<VolcanoTooltip />} cursor={{ strokeDasharray: "3 3" }} />
             <Scatter
@@ -257,6 +311,10 @@ function VolcanoPanel({ panel }: { panel: Panel }) {
           </ScatterChart>
         </ResponsiveContainer>
       </ChartPanel>
+      <div className="mt-1 text-[10px] text-muted-foreground/80">
+        Right-tail Fisher's exact (small counts) / Yates χ² (large counts) · BH-adjusted FDR.
+        Subsampled to {panel.totalPlotted.toLocaleString()} of {panel.totalAvailable.toLocaleString()} variants.
+      </div>
     </div>
   );
 }

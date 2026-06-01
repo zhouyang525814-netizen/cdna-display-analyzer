@@ -62,7 +62,16 @@ export interface NanoporePipelineRequest {
    *  when false / omitted. Both paths are byte-identical (parity-tested). */
   useWasm?: boolean;
   onProgress?: (event: NanoporePipelineProgress) => void;
+  /** Run-log channel (Phase 6.13). Receives settings recap, periodic filter-
+   *  funnel snapshots (~100k records), per-source done summary, library-
+   *  median diagnostic, FDR hit-count summary. */
+  onLog?: (event: NanoporeLogEvent) => void;
   signal?: AbortSignal;
+}
+
+export interface NanoporeLogEvent {
+  text: string;
+  tag: "info" | "success" | "warning" | "error";
 }
 
 export interface NanoporePipelineProgress {
@@ -118,6 +127,11 @@ async function* streamToAsyncIter(
 export async function runNanoporePipeline(
   req: NanoporePipelineRequest,
 ): Promise<NanoporePipelineResult> {
+  const t0 = performance.now();
+  const log = (text: string, tag: NanoporeLogEvent["tag"] = "info"): void => {
+    req.onLog?.({ text, tag });
+  };
+
   const settings: NanoporeSettings = { ...DEFAULT_SETTINGS, ...(req.settings ?? {}) };
 
   // Resolve WT ROI per site from the reference.
@@ -137,6 +151,24 @@ export async function runNanoporePipeline(
       : { name: r.name },
   );
 
+  // Settings + per-site WT recap (Phase 6.13).
+  log(
+    `Settings · WASM=${req.useWasm ? "on" : "off"}` +
+      ` · maxAnchorSubs=${settings.maxAnchorSubs}` +
+      ` · maxAnchorIndels=${settings.maxAnchorIndels}` +
+      ` · minMeanPhredRead=${settings.minMeanPhredRead}` +
+      ` · minMeanPhredRoi=${settings.minMeanPhredRoi}` +
+      ` · filterStop=${settings.filterStop}` +
+      ` · pseudocount=1.0 · FDR=BH`,
+  );
+  for (const s of resolvedSites) {
+    log(
+      `  Site ${s.name}: ROI=${s.expectedRoiLen} bp` +
+        ` · WT=${s.wtDna}` +
+        ` · Fw=${s.fwAnchor.length} bp · Rv=${s.rvAnchor.length} bp`,
+    );
+  }
+
   // Construct scorer — WASM if requested, TS fallback otherwise. The engine
   // builds its own TS scorer when none is supplied; only override when WASM.
   let scorer: SiteScorerLike | undefined;
@@ -154,11 +186,18 @@ export async function runNanoporePipeline(
     for (let srcIdx = 0; srcIdx < req.sources.length; srcIdx++) {
       const source = req.sources[srcIdx]!;
       const desc = source.describe();
+      const sizeStr = desc.sizeBytes != null
+        ? `${(desc.sizeBytes / 1024 / 1024).toFixed(1)} MB`
+        : "?";
+      log(`Source ${srcIdx + 1}/${req.sources.length}: opening ${desc.name} (${sizeStr})`);
       const stream = await source.open(req.signal);
+      const tSrc0 = performance.now();
 
       let bytesProcessed = 0;
       let recordsProcessed = 0;
       let lastReportedBytes = 0;
+      let lastLogRecord = 0;
+      const LOG_EVERY = 100_000;
       let upScratch = new Uint8Array(256);
       let upQualScratch = new Uint8Array(256);
       let rcScratch = new Uint8Array(256);
@@ -230,6 +269,30 @@ export async function runNanoporePipeline(
               recordsProcessed,
             });
           }
+          // Filter-funnel cadence (Phase 6.13).
+          if (req.onLog && recordsProcessed - lastLogRecord >= LOG_EVERY) {
+            lastLogRecord = recordsProcessed;
+            const gb = engine.globalBreakdown;
+            // Aggregate per-site passed_qc across all rounds.
+            let passed = 0;
+            let anchorFound = 0;
+            let roiIndel = 0;
+            let lowQRoi = 0;
+            for (const stats of engine.stats.values()) {
+              for (const ss of Object.values(stats.sites)) {
+                passed += ss.passed_qc;
+                anchorFound += ss.anchor_found;
+                roiIndel += ss.discard_roi_indel;
+                lowQRoi += ss.discard_low_q_roi;
+              }
+            }
+            log(
+              `  …${(recordsProcessed / 1000).toFixed(0)}k reads · passed=${passed}` +
+                ` · lowQ=${gb.low_quality_read} · bcMiss=${gb.barcode_mismatch}` +
+                ` · noSite=${gb.no_site_extracted}` +
+                ` · anchorOk=${anchorFound} · roiIndel=${roiIndel} · lowQroi=${lowQRoi}`,
+            );
+          }
         }
       } finally {
         req.onProgress?.({
@@ -238,6 +301,28 @@ export async function runNanoporePipeline(
           totalBytes: desc.sizeBytes,
           recordsProcessed,
         });
+      }
+
+      // Per-source completion summary (Phase 6.13). Reuses the boundRoundIdx
+      // computed before the read loop above.
+      const dt = ((performance.now() - tSrc0) / 1000).toFixed(1);
+      if (boundRoundIdx >= 0) {
+        const roundName = rounds[boundRoundIdx]?.name ?? "?";
+        const stats = engine.stats.get(roundName);
+        if (stats) {
+          const sitePassed = Object.values(stats.sites).map((s) => s.passed_qc);
+          const totalPassed = sitePassed.reduce((a, b) => a + b, 0);
+          log(
+            `  ${desc.name} done in ${dt}s · ${recordsProcessed} reads` +
+              ` · ${totalPassed} site-passes across ${sitePassed.length} site(s)`,
+            "success",
+          );
+        }
+      } else {
+        log(
+          `  ${desc.name} done in ${dt}s · ${recordsProcessed} reads processed`,
+          "success",
+        );
       }
     }
   } finally {
@@ -248,6 +333,8 @@ export async function runNanoporePipeline(
     }
   }
 
+  const tAnalyzer0 = performance.now();
+  log("Demultiplex complete; running analyzer (DNA→AA, RPM, fitness, Z, p, FDR)…");
   const roundNames = rounds.map((r) => r.name);
   const siteNames = resolvedSites.map((s) => s.name);
   const analyzer = runNanoporeAnalyzer({
@@ -259,6 +346,45 @@ export async function runNanoporePipeline(
     sites: resolvedSites.map((s) => ({ name: s.name, wtDna: s.wtDna })),
     emitHaplotype: settings.reportHaplotype,
   });
+  const dtAnalyzer = ((performance.now() - tAnalyzer0) / 1000).toFixed(1);
+
+  // Library-median diagnostic + FDR summary (Phase 6.13).
+  const med = analyzer.libraryMedianFitness;
+  for (const key of Object.keys(med)) {
+    const m = med[key]!;
+    const tag = m < -1 || m > 1 ? "warning" : "info";
+    const flag = tag === "warning" ? "⚠ " : "";
+    log(`Library median Fitness_vs_WT ${key} = ${m.toFixed(3)} ${flag}`, tag as NanoporeLogEvent["tag"]);
+  }
+
+  // Hit counts per (site, last round) at standard FDR thresholds.
+  const lastRound = roundNames[roundNames.length - 1];
+  const firstRound = roundNames[0];
+  if (lastRound && firstRound && lastRound !== firstRound) {
+    const qCol = `FDR_q_${lastRound}`;
+    const counts = new Map<string, { total: number; q05: number; q01: number }>();
+    for (const row of analyzer.perSiteRows) {
+      const site = String(row.Site);
+      const c = counts.get(site) ?? { total: 0, q05: 0, q01: 0 };
+      c.total++;
+      const q = row[qCol] as number;
+      if (Number.isFinite(q)) {
+        if (q < 0.05) c.q05++;
+        if (q < 0.01) c.q01++;
+      }
+      counts.set(site, c);
+    }
+    for (const [site, c] of counts) {
+      log(
+        `Site ${site} @ ${lastRound}: ${c.q05.toLocaleString()} variants with FDR < 0.05` +
+          ` (${c.q01.toLocaleString()} with FDR < 0.01)` +
+          ` out of ${c.total.toLocaleString()} unique AAs`,
+        c.q05 > 0 ? "success" : "info",
+      );
+    }
+  }
+  log(`Analyzer: ${dtAnalyzer}s · ${analyzer.perSiteRows.length.toLocaleString()} per-site rows`);
+  log(`Total runtime: ${((performance.now() - t0) / 1000).toFixed(1)}s`, "success");
 
   return {
     dnaCounters: engine.dnaCounters,

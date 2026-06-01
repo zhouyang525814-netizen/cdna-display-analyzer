@@ -47,6 +47,14 @@ export interface PipelineProgressMsg {
   recordsProcessed: number;
 }
 
+/** Run-log line emitted from inside the worker. The main thread appends each
+ *  one to the UI terminal (Phase 6.13). `tag` chooses the line colour
+ *  (info / success / warning / error). */
+export interface PipelineLogMsg {
+  text: string;
+  tag: "info" | "success" | "warning" | "error";
+}
+
 // Serializable pipeline outcome. Maps in core/PipelineResult become plain
 // objects keyed by round name; counter Maps are stripped (consumers can
 // re-derive any per-DNA stats from the CSV).

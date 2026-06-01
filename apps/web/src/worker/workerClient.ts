@@ -8,6 +8,7 @@ import type {
   NanoporeJob,
   NanoporeOutcome,
   PipelineJob,
+  PipelineLogMsg,
   PipelineOutcome,
   PipelineProgressMsg,
 } from "./types";
@@ -70,6 +71,7 @@ function ensureWorker(): Comlink.Remote<PipelineWorkerApi> {
 export async function runInWorker(
   job: PipelineJob,
   onProgress?: (msg: PipelineProgressMsg) => void,
+  onLog?: (msg: PipelineLogMsg) => void,
 ): Promise<PipelineOutcome> {
   const a = ensureWorker();
 
@@ -80,10 +82,11 @@ export async function runInWorker(
   await workerReady;
   console.log("[main] worker is ready — sending run() call");
 
-  // Comlink.proxy lets the worker call back into our progress handler.
+  // Comlink.proxy lets the worker call back into our progress + log handlers.
   const progress = onProgress ? Comlink.proxy(onProgress) : undefined;
+  const log = onLog ? Comlink.proxy(onLog) : undefined;
   try {
-    const result = await a.run(job, progress);
+    const result = await a.run(job, progress, log);
     console.log("[main] worker.run() returned");
     return result;
   } catch (err) {
@@ -97,6 +100,7 @@ export async function runInWorker(
 export async function runNanoporeInWorker(
   job: NanoporeJob,
   onProgress?: (msg: PipelineProgressMsg) => void,
+  onLog?: (msg: PipelineLogMsg) => void,
 ): Promise<NanoporeOutcome> {
   const a = ensureWorker();
 
@@ -105,8 +109,9 @@ export async function runNanoporeInWorker(
   console.log("[main] (nanopore) worker is ready — sending runNanopore() call");
 
   const progress = onProgress ? Comlink.proxy(onProgress) : undefined;
+  const log = onLog ? Comlink.proxy(onLog) : undefined;
   try {
-    const result = await a.runNanopore(job, progress);
+    const result = await a.runNanopore(job, progress, log);
     console.log("[main] worker.runNanopore() returned");
     return result;
   } catch (err) {

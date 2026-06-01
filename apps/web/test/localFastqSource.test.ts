@@ -38,6 +38,7 @@ function loadConfig(text: string): { rounds: RoundConfigInput[]; settings: Demul
     adaptive: cfg.settings?.adaptive ?? true,
     filterStop: cfg.settings?.filter_stop ?? true,
     minMeanPhred: 20.0,
+    minMeanPhredCds: 20.0,
   };
   return { rounds, settings };
 }
